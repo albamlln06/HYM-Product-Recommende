@@ -1,10 +1,14 @@
+from pathlib import Path
 import pandas as pd
 
-def load_dataset():
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+DATA_DIR = BASE_DIR / 'data'
 
-    df_customers = pd.read_parquet('data/customers.parquet')
-    df_products = pd.read_parquet('data/articles.parquet')
-    df_transactions = pd.read_parquet('data/transactions_train.parquet')
+def load_dataset():
+    df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
+    df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
+    df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
+    return df_customers, df_products, df_transactions
 
     return df_customers, df_products, df_transactions
 
