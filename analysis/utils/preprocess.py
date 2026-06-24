@@ -10,13 +10,11 @@ def load_dataset():
     df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
     return df_customers, df_products, df_transactions
 
-    return df_customers, df_products, df_transactions
-
 def load_complete_dateset_filtered_date(beg_date, end_date):
 
-    df_customers = pd.read_parquet('data/customers.parquet')
-    df_products = pd.read_parquet('data/articles.parquet')
-    df_transactions = pd.read_parquet('data/transactions_train.parquet')
+    df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
+    df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
+    df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
 
     df_transactions['t_dat'] = pd.to_datetime(df_transactions['t_dat'])
     mask = (df_transactions['t_dat'] >= beg_date) & (df_transactions['t_dat'] <= end_date)
@@ -26,9 +24,9 @@ def load_complete_dateset_filtered_date(beg_date, end_date):
 
 def load_complete_dataset_filtered_number_customers(num_customers):
 
-    df_customers = pd.read_parquet('data/customers.parquet')
-    df_products = pd.read_parquet('data/articles.parquet')
-    df_transactions = pd.read_parquet('data/transactions_train.parquet')
+    df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
+    df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
+    df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
 
     unique_customer_ids = df_transactions['customer_id'].unique()
 
@@ -48,3 +46,16 @@ def merge_datasets_inner(df_customers, df_products, df_transactions):
     df_merged = pd.merge(df_transactions, df_customers, on='customer_id', how='inner')
     df_merged = pd.merge(df_merged, df_products, on='article_id', how='inner')
     return df_merged
+
+def transactions_group(df_transactions):
+    groups = df_transactions.groupby(['t_dat', 'customer_id'], sort=False).ngroup()
+    df_transactions = df_transactions.copy()
+    df_transactions['transaction_id'] = (
+        groups.astype(str) + '_' + df_transactions['customer_id'].astype(str)
+    )
+    return df_transactions
+
+def filter_customers_by_min_orders(df_transactions, n):
+    orders_per_customer = df_transactions.groupby('customer_id')['transaction_id'].nunique()
+    active_customers = orders_per_customer[orders_per_customer > n].index
+    return df_transactions[df_transactions['customer_id'].isin(active_customers)]
