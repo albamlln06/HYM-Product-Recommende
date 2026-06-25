@@ -164,3 +164,51 @@ def recommend_by_cluster_similarity(
         cols.append(rating_col)
 
     return recommendations[cols]
+
+
+# ==========================================
+# MÉTRICAS DE EVALUACIÓN
+# ==========================================
+def apk(actual, predicted, k=12):
+    if len(predicted) > k:
+        predicted = predicted[:k]
+
+    score = 0.0
+    num_hits = 0.0
+
+    for i, p in enumerate(predicted):
+        if p in actual and p not in predicted[:i]:
+            num_hits += 1.0
+            score += num_hits / (i + 1.0)
+
+    if not actual:
+        return 0.0
+
+    return score / min(len(actual), k)
+
+def mapk(actual, predicted, k=12):
+    return np.mean([apk(a, p, k) for a, p in zip(actual, predicted)])
+
+# ==========================================
+# MODELOS BASE
+# ==========================================
+def predict_random(df_train, users_list, k=12, seed=42):
+    """
+    Genera k predicciones aleatorias para una lista de usuarios.
+    """
+    np.random.seed(seed)
+    todos_los_articulos = df_train['article_id'].unique()
+    
+    # Generamos la matriz de predicciones
+    predictions = [np.random.choice(todos_los_articulos, k, replace=False).tolist() for _ in range(len(users_list))]
+    return predictions
+
+def predict_popular(df_train, users_list, k=12):
+    """
+    Recomienda los k artículos más vendidos del histórico a todos los usuarios.
+    """
+    top_k_articulos = df_train['article_id'].value_counts().head(k).index.tolist()
+    
+    # Matriz donde todos reciben la misma recomendación top
+    predictions = [top_k_articulos for _ in range(len(users_list))]
+    return predictions

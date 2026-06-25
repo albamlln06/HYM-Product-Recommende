@@ -59,3 +59,37 @@ def filter_customers_by_min_orders(df_transactions, n):
     orders_per_customer = df_transactions.groupby('customer_id')['transaction_id'].nunique()
     active_customers = orders_per_customer[orders_per_customer > n].index
     return df_transactions[df_transactions['customer_id'].isin(active_customers)]
+
+def imputar_nulos_tfm(df):
+    """
+    Imputa los valores nulos del DataFrame de H&M basándose en reglas de negocio.
+    """
+    print("Iniciando imputación de valores nulos...")
+    df_clean = df.copy()
+    
+    # 1. Variables Binarias de Marketing (FN y Active)
+    # Rellenamos con 0 y forzamos a int8 para ahorrar muchísima memoria RAM
+    for col in ['FN', 'Active']:
+        if col in df_clean.columns:
+            df_clean[col] = df_clean[col].fillna(0).astype('int8')
+            
+    # 2. Variables de Fidelización (Textos/Categorías)
+    if 'fashion_news_frequency' in df_clean.columns:
+        # Primero unificamos si hay alguna escrita como 'None' en minúsculas, luego rellenamos los nulos
+        df_clean['fashion_news_frequency'] = df_clean['fashion_news_frequency'].replace('None', 'NONE').fillna('NONE')
+        
+    if 'club_member_status' in df_clean.columns:
+        df_clean['club_member_status'] = df_clean['club_member_status'].fillna('GUEST')
+        
+    # 3. La Edad (Estrategia MVP: Mediana global)
+    if 'age' in df_clean.columns:
+        mediana_edad = df_clean['age'].median()
+        df_clean['age'] = df_clean['age'].fillna(mediana_edad)
+        print(f" -> Edad imputada por la mediana: {mediana_edad} años.")
+        
+    # 4. Descripciones (Solo por si no las habías filtrado antes)
+    if 'detail_desc' in df_clean.columns:
+        df_clean['detail_desc'] = df_clean['detail_desc'].fillna('Sin descripción')
+
+    print("¡Imputación completada! Dataset listo para el análisis.")
+    return df_clean
