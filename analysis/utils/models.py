@@ -15,8 +15,7 @@ CATEGORICAL_FEATURES = [
 ]
 
 
-def clustering_preprocess(datasets):
-    df_customers, df_products, df_transactions = datasets
+def clustering_preprocess(df_customers, df_products, df_transactions):
 
     avg_age = (
         df_transactions.merge(df_customers[['customer_id', 'age']], on='customer_id', how='left')
@@ -98,7 +97,7 @@ def inspect_clusters(df_products, df_clusters, numeric_cols=None, category_col='
 def cluster_products(K=6, datasets=None):
     numeric_cols = ['avg_buyer_age']
 
-    X_final, article_ids, scaler, df_products = clustering_preprocess(datasets)
+    X_final, article_ids, scaler, df_products = clustering_preprocess(*datasets)
 
     find_optimal_k(X_final, k_range=range(2, 15))
 
@@ -208,7 +207,40 @@ def predict_popular(df_train, users_list, k=12):
     Recomienda los k artículos más vendidos del histórico a todos los usuarios.
     """
     top_k_articulos = df_train['article_id'].value_counts().head(k).index.tolist()
-    
+
     # Matriz donde todos reciben la misma recomendación top
     predictions = [top_k_articulos for _ in range(len(users_list))]
     return predictions
+
+
+# ==========================================
+# PIPELINE COMPLETO DE RECOMENDACIÓN
+# ==========================================
+def predict_cluster(df_transactions, df_customers, df_products, customer_ids, K=8, top_n=12, explore_k=False):
+
+    X_final, article_ids, _, df_products_enriched = clustering_preprocess(df_customers, df_products, df_transactions)
+
+    if explore_k:
+        find_optimal_k(X_final, k_range=range(2, 15))
+
+    df_clusters, kmeans_model = fit_product_clustering(X_final, K, article_ids)
+
+    df_merged, summary = inspect_clusters(
+        df_products=df_products_enriched,
+        df_clusters=df_clusters,
+        category_col='product_group_name',
+    )
+
+    predictions = []
+    for customer_id in customer_ids:
+        recs = recommend_by_cluster_similarity(
+            customer_id=customer_id,
+            df_transactions=df_transactions,
+            df_clusters_with_price=df_merged,
+            X_final=X_final,
+            article_ids=article_ids,
+            top_n=top_n,
+        )
+        predictions.append(recs['article_id'].tolist() if not recs.empty else [])
+
+    return predictions, df_merged, summary, kmeans_model
