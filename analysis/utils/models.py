@@ -12,6 +12,17 @@ CATEGORICAL_FEATURES = [
     'perceived_colour_master_name',
     'garment_group_name',
     'index_group_name',
+    'graphical_appearance_name',
+    'index_name',
+    'section_name',
+]
+
+NUMERIC_FEATURES = [
+    'avg_buyer_age',
+    'avg_price',
+    'sales_volume',
+    'online_ratio',
+    'recency_days',
 ]
 
 
@@ -25,11 +36,26 @@ def clustering_preprocess(df_customers, df_products, df_transactions):
         .rename(columns={'age': 'avg_buyer_age'})
     )
 
-    df = df_products.merge(avg_age, on='article_id', how='left')
-    df['avg_buyer_age'] = df['avg_buyer_age'].fillna(df['avg_buyer_age'].median())
+    max_date = df_transactions['t_dat'].max()
+    tx_features = (
+        df_transactions.groupby('article_id').agg(
+            avg_price=('price', 'mean'),
+            sales_volume=('article_id', 'count'),
+            online_ratio=('sales_channel_id', lambda x: (x == 2).mean()),
+            recency_days=('t_dat', lambda x: (max_date - x.max()).days),
+        ).reset_index()
+    )
 
-    encoded = pd.get_dummies(df[CATEGORICAL_FEATURES], drop_first=False)
-    X = pd.concat([encoded, df[['avg_buyer_age']]], axis=1).astype(float)
+    df = df_products.merge(avg_age, on='article_id', how='left')
+    df = df.merge(tx_features, on='article_id', how='left')
+
+    for col in NUMERIC_FEATURES:
+        if col in df.columns:
+            df[col] = df[col].fillna(df[col].median())
+
+    available_cat = [c for c in CATEGORICAL_FEATURES if c in df.columns]
+    encoded = pd.get_dummies(df[available_cat], drop_first=False)
+    X = pd.concat([encoded, df[NUMERIC_FEATURES]], axis=1).astype(float)
 
     scaler = StandardScaler()
     X_final = scaler.fit_transform(X)
