@@ -60,6 +60,54 @@ def filter_customers_by_min_orders(df_transactions, n):
     active_customers = orders_per_customer[orders_per_customer > n].index
     return df_transactions[df_transactions['customer_id'].isin(active_customers)]
 
+def compute_customer_category_affinity(
+    df_products,
+    df_transactions,
+    category_col: str = 'product_group_name',
+    pivot: bool = True,
+) -> pd.DataFrame:
+    """
+    Calcula la afinidad de cada cliente a cada categoría de producto.
+
+    La afinidad es la proporción de compras del cliente que pertenecen
+    a cada categoría (suma 1 por cliente).
+
+    Parámetros
+    ----------
+    category_col : columna de df_products a usar como categoría.
+                   Por defecto 'product_group_name'. Otras opciones:
+                   'index_group_name', 'garment_group_name', 'section_name'.
+    pivot        : si True devuelve un DataFrame ancho (customer_id × categorías).
+                   si False devuelve formato largo (customer_id, category, affinity).
+    """
+    df = df_transactions[['customer_id', 'article_id']].merge(
+        df_products[['article_id', category_col]],
+        on='article_id',
+        how='left',
+    )
+
+    counts = (
+        df.groupby(['customer_id', category_col])
+        .size()
+        .reset_index(name='n_purchases')
+    )
+
+    totals = counts.groupby('customer_id')['n_purchases'].transform('sum')
+    counts['affinity'] = counts['n_purchases'] / totals
+
+    if not pivot:
+        return counts[['customer_id', category_col, 'affinity']]
+
+    affinity_pivot = counts.pivot_table(
+        index='customer_id',
+        columns=category_col,
+        values='affinity',
+        fill_value=0.0,
+    )
+    affinity_pivot.columns.name = None
+    return affinity_pivot
+
+
 def imputar_nulos_tfm(df):
     """
     Imputa los valores nulos del DataFrame de H&M basándose en reglas de negocio.
