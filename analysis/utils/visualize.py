@@ -43,6 +43,10 @@ def plot_clusters_by_k(X_final, k_values, sample_size=3000, random_state=42):
             centroids_2d[:, 0], centroids_2d[:, 1],
             c="black", marker="X", s=120, zorder=5, label="Centroids",
         )
+        x_lo, x_hi = np.percentile(X_2d[:, 0], [1, 99])
+        y_lo, y_hi = np.percentile(X_2d[:, 1], [1, 99])
+        axes[i].set_xlim(x_lo, x_hi)
+        axes[i].set_ylim(y_lo, y_hi)
         axes[i].set_title(f"K = {k}", fontsize=13)
         axes[i].set_xlabel("PC1")
         axes[i].set_ylabel("PC2")

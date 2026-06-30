@@ -437,4 +437,4 @@ def predict_cluster(df_transactions, df_customers, df_products, customer_ids, K=
         )
         predictions.append(recs['article_id'].tolist() if not recs.empty else [])
 
-    return predictions, df_merged, summary, kmeans_model
+    return predictions, df_merged, summary, kmeans_model, X_final
