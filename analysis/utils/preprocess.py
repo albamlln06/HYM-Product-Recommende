@@ -60,12 +60,31 @@ def filter_customers_by_min_orders(df_transactions, n):
     active_customers = orders_per_customer[orders_per_customer > n].index
     return df_transactions[df_transactions['customer_id'].isin(active_customers)]
 
+def filter_customers_by_activity(
+    df_transactions,
+    min_purchases: int = 3,
+    max_months_since_last_purchase: int = 6,
+):
+
+    reference_date = df_transactions['t_dat'].max()
+    cutoff_date = reference_date - pd.DateOffset(months=max_months_since_last_purchase)
+
+    purchase_counts = df_transactions.groupby('customer_id')['article_id'].count()
+    last_purchase = df_transactions.groupby('customer_id')['t_dat'].max()
+
+    active = purchase_counts.index[
+        (purchase_counts >= min_purchases) & (last_purchase >= cutoff_date)
+    ]
+
+    return df_transactions[df_transactions['customer_id'].isin(active)]
+
+
 def compute_customer_category_affinity(
     df_products,
     df_transactions,
     category_col: str = 'product_group_name',
     pivot: bool = True,
-) -> pd.DataFrame:
+):
     """
     Calcula la afinidad de cada cliente a cada categoría de producto.
 
