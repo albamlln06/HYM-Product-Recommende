@@ -56,6 +56,8 @@ def transactions_group(df_transactions):
     return df_transactions
 
 def filter_customers_by_min_orders(df_transactions, n):
+    print(df_transactions.describe())
+    print(df_transactions.info())
     orders_per_customer = df_transactions.groupby('customer_id')['transaction_id'].nunique()
     active_customers = orders_per_customer[orders_per_customer > n].index
     return df_transactions[df_transactions['customer_id'].isin(active_customers)]
@@ -66,6 +68,8 @@ def filter_customers_by_activity(
     max_months_since_last_purchase: int = 6,
 ):
 
+    df_transactions = df_transactions.copy()
+    df_transactions['t_dat'] = pd.to_datetime(df_transactions['t_dat'])
     reference_date = df_transactions['t_dat'].max()
     cutoff_date = reference_date - pd.DateOffset(months=max_months_since_last_purchase)
 
@@ -76,7 +80,8 @@ def filter_customers_by_activity(
         (purchase_counts >= min_purchases) & (last_purchase >= cutoff_date)
     ]
 
-    return df_transactions[df_transactions['customer_id'].isin(active)]
+    df_filtered = df_transactions[df_transactions['customer_id'].isin(active)]
+    return transactions_group(df_filtered)
 
 
 def compute_customer_category_affinity(
