@@ -75,10 +75,19 @@ def compute_article_features(df_customers, df_products, df_transactions):
     df = df_products.merge(avg_age, on="article_id", how="left")
     df = df.merge(article_sale_features, on="article_id", how="left")
  
-    for col in NUMERIC_FEATURES_CLUSTER:
+    # Estrategia de imputación personalizada para evitar sesgos en el modelo
+    imputation_strategy = {
+        'avg_buyer_age': df['avg_buyer_age'].median(),
+        'avg_price': df['avg_price'].median(),
+        'sales_volume': 0.0,
+        'online_ratio': 0.0,
+        'recency_days': 999.0  # Los máximos días posibles en nuestro dataset
+    }
+    # Aplicamos tu lógica columna por columna
+    for col, fill_value in imputation_strategy.items():
         if col in df.columns:
-            df[col] = df[col].fillna(df[col].median())
-
+            df[col] = df[col].fillna(fill_value)
+            
     if 'index_group_name' in df.columns:
         group_mean = df.groupby('index_group_name')['sales_volume'].transform('mean')
         df['sex_popularity'] = (df['sales_volume'] / group_mean.replace(0, np.nan)).fillna(0)
