@@ -165,3 +165,44 @@ def imputar_nulos_tfm(df):
 
     print("¡Imputación completada! Dataset listo para el análisis.")
     return df_clean
+
+
+def auto_optimize_categories(df, max_ratio=0.05, max_categories=500, exclude_cols=None):
+    """
+    Convierte automáticamente columnas de texto a 'category' de forma segura.
+    
+    Parámetros:
+    -----------
+    df : pandas.DataFrame
+    max_ratio : float
+        Proporción máxima permitida.
+    max_categories : int
+        Límite máximo absoluto de categorías a crear.
+    exclude_cols : list
+        Lista de nombres de columnas que NO deben convertirse bajo ninguna circunstancia (ej. fechas).
+    """
+    # Si no nos pasan ninguna lista de exclusión, usamos una vacía por defecto
+    if exclude_cols is None:
+        exclude_cols = []
+        
+    text_columns = df.select_dtypes(include=['object', 'string']).columns
+    total_rows = len(df)
+    columnas_convertidas = []
+    
+    for col in text_columns:
+        # Si la columna está en la lista de ignoradas, saltamos a la siguiente
+        if col in exclude_cols:
+            continue
+            
+        num_unique = df[col].nunique()
+        ratio = num_unique / total_rows
+        
+        if ratio < max_ratio and num_unique <= max_categories:
+            df[col] = df[col].astype('category')
+            columnas_convertidas.append(col)
+            
+    print(f"✅ Se convirtieron {len(columnas_convertidas)} columnas a 'category':")
+    if columnas_convertidas:
+        print(f"   -> {', '.join(columnas_convertidas)}")
+        
+    return df

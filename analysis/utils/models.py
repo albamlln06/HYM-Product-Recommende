@@ -81,9 +81,9 @@ def compute_article_features(df_customers, df_products, df_transactions):
         'avg_price': df['avg_price'].median(),
         'sales_volume': 0.0,
         'online_ratio': 0.0,
-        'recency_days': 999.0  # Los máximos días posibles en nuestro dataset
+        'recency_days': 999.0  # Valor elevado para evitar sesgos en el modelo
     }
-    # Aplicamos tu lógica columna por columna
+    # Aplicamos la lógica columna por columna
     for col, fill_value in imputation_strategy.items():
         if col in df.columns:
             df[col] = df[col].fillna(fill_value)
