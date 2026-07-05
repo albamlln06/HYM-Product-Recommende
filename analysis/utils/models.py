@@ -69,19 +69,31 @@ def compute_article_features(df_customers, df_products, df_transactions):
             sales_volume=("article_id", "count"),
             online_ratio=("is_online", "mean"),
             recency_days=("t_dat", lambda x: (max_date - x.max()).days),
+            first_sale_date = ("t_dat", "min")
         ).reset_index()
     )
- 
+    article_sale_features['product_age_days'] = (max_date - article_sale_features['first_sale_date']).dt.days
+    article_sale_features = article_sale_features.drop(columns=['first_sale_date'])
+
+    # Esto se pone justo antes de hacer tu df_products.merge()
+    fecha_corte_30d = max_date - pd.Timedelta(days=30)
+    
+    # Filtramos ventas recientes y contamos
+    ventas_recientes = df_transactions[df_transactions['t_dat'] >= fecha_corte_30d]
+    momentum = ventas_recientes.groupby('article_id').size().reset_index(name='sales_last_30d')
+
     df = df_products.merge(avg_age, on="article_id", how="left")
     df = df.merge(article_sale_features, on="article_id", how="left")
- 
+    df = df.merge(momentum, on="article_id", how="left")
     # Estrategia de imputación personalizada para evitar sesgos en el modelo
     imputation_strategy = {
         'avg_buyer_age': df['avg_buyer_age'].median(),
         'avg_price': df['avg_price'].median(),
         'sales_volume': 0.0,
         'online_ratio': 0.0,
-        'recency_days': 999.0  # Valor elevado para evitar sesgos en el modelo
+        'recency_days': 999.0,
+        'sales_last_30d':0.0,
+        'product_age_days': 0.0  # Valor elevado para evitar sesgos en el modelo
     }
     # Aplicamos la lógica columna por columna
     for col, fill_value in imputation_strategy.items():
@@ -160,13 +172,18 @@ def clustering_preprocess_old(df_customers, df_products, df_transactions):
 def compute_user_features(df_customers, df_transactions,df_products):
     #Solo para XGBoost
     """Features de usuario calculadas SOLO con transacciones de train."""
+    max_date = df_transactions['t_dat'].max()
+
     user_tx = df_transactions.groupby("customer_id").agg(
         user_n_compras=("article_id", "count"),
         user_precio_medio=("price", "mean"),
         user_precio_std=("price", "std"),
-        user_online_ratio=("is_online", "mean")
+        user_online_ratio=("is_online", "mean"),
+        user_last_buy = ("t_dat", "max")
     ).reset_index()
     user_tx["user_precio_std"] = user_tx["user_precio_std"].fillna(0)
+    user_tx["user_recency_days"] = (max_date - user_tx['user_last_buy']).dt.days
+    user_tx = user_tx.drop(columns=['user_last_buy']) # Borramos la fecha, ya no hace falta
  
     cols_customer = [c for c in ["customer_id", "age", "club_member_status"] if c in df_customers.columns]
     user_df = user_tx.merge(df_customers[cols_customer], on="customer_id", how="left")
@@ -189,6 +206,31 @@ def compute_user_features(df_customers, df_transactions,df_products):
     # Unimos todo al df de usuario
     user_df = user_df.merge(favorite_section, on="customer_id", how="left")
     return user_df
+def compute_cross_features(dataset):
+    """
+    Calcula variables que relacionan al cliente con el artículo específico.
+    Se debe ejecutar DESPUÉS de hacer los merges de usuario y artículo.
+    """
+    # 1. AFINIDAD DE PRECIO
+    # Diferencia absoluta
+    dataset['cross_price_diff'] = (dataset['avg_price'] - dataset['user_precio_medio']).abs()
+    # Ratio (Cuidado con las divisiones por cero)
+    dataset['cross_price_ratio'] = dataset['avg_price'] / dataset['user_precio_medio'].replace(0, np.nan)
+    # Si el usuario no tiene precio medio, el ratio es 1 (precio normal)
+    dataset['cross_price_ratio'] = dataset['cross_price_ratio'].fillna(1.0)
+
+    # 2. AFINIDAD DEMOGRÁFICA
+    if 'age' in dataset.columns and 'avg_buyer_age' in dataset.columns:
+        dataset['cross_age_diff'] = (dataset['age'] - dataset['avg_buyer_age']).abs()
+        
+    # 3. AFINIDAD DE SECCIÓN
+    if 'section_name' in dataset.columns and 'user_favorite_section' in dataset.columns:
+        # 1 si es su sección favorita, 0 si no
+        dataset['cross_is_favorite_section'] = (dataset['section_name'] == dataset['user_favorite_section']).astype('int8')
+        
+    
+
+    return dataset
 
 # def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
 #     """
