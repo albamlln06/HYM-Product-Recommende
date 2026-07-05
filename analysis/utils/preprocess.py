@@ -5,33 +5,42 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / 'data'
 
 def load_dataset():
+    """
+    Carga los archivos desde el disco y aplica el formato correcto a las columnas clave.
+    Todas las demás funciones deben llamar a esta para evitar repetir código.
+    """
     df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
     df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
     df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
+    
+    # Centralizamos aquí la conversión a datetime para que aplique a todo
+    if 't_dat' in df_transactions.columns:
+        df_transactions['t_dat'] = pd.to_datetime(df_transactions['t_dat'])
+        
     return df_customers, df_products, df_transactions
 
+
 def load_complete_dateset_filtered_date(beg_date, end_date):
+    """Filtra las transacciones por un rango de fechas."""
+    # 1. Cargamos los datos usando la función base
+    df_customers, df_products, df_transactions = load_dataset()
 
-    df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
-    df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
-    df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
-
-    df_transactions['t_dat'] = pd.to_datetime(df_transactions['t_dat'])
+    # 2. Aplicamos el filtro (t_dat ya es datetime gracias a la función base)
     mask = (df_transactions['t_dat'] >= beg_date) & (df_transactions['t_dat'] <= end_date)
     df_transactions_filtered = df_transactions.loc[mask]
 
     return df_customers, df_products, df_transactions_filtered
 
-def load_complete_dataset_filtered_number_customers(num_customers):
+def load_complete_dataset_filtered_number_customers(num_customers, random_state=42):
+    """Filtra el dataset para quedarse con un número específico de clientes."""
+    # 1. Cargamos los datos usando la función base
+    df_customers, df_products, df_transactions = load_dataset()
 
-    df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
-    df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
-    df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
-
+    # 2. Extraemos y muestreamos clientes
     unique_customer_ids = df_transactions['customer_id'].unique()
+    sampled_customer_ids = pd.Series(unique_customer_ids).sample(n=num_customers, random_state=random_state)
 
-    sampled_customer_ids = pd.Series(unique_customer_ids).sample(n=num_customers, random_state=42)
-
+    # 3. Filtramos
     df_customers_filtered = df_customers[df_customers['customer_id'].isin(sampled_customer_ids)]
     df_transactions_filtered = df_transactions[df_transactions['customer_id'].isin(sampled_customer_ids)]
 
