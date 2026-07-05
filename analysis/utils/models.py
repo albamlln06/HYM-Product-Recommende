@@ -6,6 +6,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 import xgboost as xgb
+from preprocess import auto_optimize_categories, imputar_nulos_tfm
 
 
 CATEGORICAL_FEATURES_CLUSTER = [
@@ -67,7 +68,7 @@ def compute_article_features(df_customers, df_products, df_transactions):
         df_transactions.groupby("article_id").agg(
             avg_price=("price", "mean"),
             sales_volume=("article_id", "count"),
-            online_ratio=("sales_channel_id", lambda x: (x == 2).mean()),
+            online_ratio=("is_online", "mean")
             recency_days=("t_dat", lambda x: (max_date - x.max()).days),
         ).reset_index()
     )
@@ -134,7 +135,7 @@ def clustering_preprocess_old(df_customers, df_products, df_transactions):
         df_transactions.groupby('article_id').agg(
             avg_price=('price', 'mean'),
             sales_volume=('article_id', 'count'),
-            online_ratio=('sales_channel_id', lambda x: (x == 2).mean()),
+            online_ratio=("is_online", "mean"),
             recency_days=('t_dat', lambda x: (max_date - x.max()).days),
         ).reset_index()
     )
@@ -164,7 +165,7 @@ def compute_user_features(df_customers, df_transactions):
         user_n_compras=("article_id", "count"),
         user_precio_medio=("price", "mean"),
         user_precio_std=("price", "std"),
-        user_online_ratio=("sales_channel_id", lambda x: (x == 2).mean()),
+        user_online_ratio=("is_online", "mean")
     ).reset_index()
     user_tx["user_precio_std"] = user_tx["user_precio_std"].fillna(0)
  
@@ -447,7 +448,11 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
         .merge(user_df,       on='customer_id', how='left')
         .merge(article_encoded, on='article_id',  how='left')
     )
-
+    #imputamos los nulos
+    dataset = imputar_nulos_tfm(dataset)
+    #Convertimos los textos a categorías para ahorrar memoria RAM
+    dataset = auto_optimize_categories(dataset,
+                                       exclude_cols=['customer_id', 'article_id', 'label'])
     # 6. Separar X e y
     cols_no_feature = ['customer_id', 'article_id', 'label']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]

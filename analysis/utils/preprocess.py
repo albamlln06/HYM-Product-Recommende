@@ -16,6 +16,17 @@ def load_dataset():
     # Centralizamos aquí la conversión a datetime para que aplique a todo
     if 't_dat' in df_transactions.columns:
         df_transactions['t_dat'] = pd.to_datetime(df_transactions['t_dat'])
+    
+    if 'sales_channel_id' in df_transactions.columns:
+        # Si es 2 (Online) pasa a ser 1. Si es 1 (Física) pasa a ser 0.
+        # Al usar astype('int8') la comprimimos al tamaño mínimo en el mismo paso
+        df_transactions['is_online'] = (df_transactions['sales_channel_id'] == 2).astype('int8')
+        
+        # Borramos la original para no duplicar datos
+        df_transactions = df_transactions.drop(columns=['sales_channel_id'])
+    
+    df_customers = auto_optimize_categories(df_customers, exclude_cols=['customer_id'])
+    df_products = auto_optimize_categories(df_products, exclude_cols=['article_id'])
         
     return df_customers, df_products, df_transactions
 
