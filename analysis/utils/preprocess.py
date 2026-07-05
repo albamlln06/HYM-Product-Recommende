@@ -156,7 +156,6 @@ def imputar_nulos_tfm(df):
     """
     Imputa los valores nulos del DataFrame de H&M basándose en reglas de negocio.
     """
-    print("Iniciando imputación de valores nulos...")
     df_clean = df.copy()
     
     # 1. Variables Binarias de Marketing (FN y Active)
@@ -177,13 +176,10 @@ def imputar_nulos_tfm(df):
     if 'age' in df_clean.columns:
         mediana_edad = df_clean['age'].median()
         df_clean['age'] = df_clean['age'].fillna(mediana_edad)
-        print(f" -> Edad imputada por la mediana: {mediana_edad} años.")
         
     # 4. Descripciones (Solo por si no las habías filtrado antes)
     if 'detail_desc' in df_clean.columns:
         df_clean['detail_desc'] = df_clean['detail_desc'].fillna('Sin descripción')
-
-    print("¡Imputación completada! Dataset listo para el análisis.")
     return df_clean
 
 
@@ -220,9 +216,5 @@ def auto_optimize_categories(df, max_ratio=0.05, max_categories=500, exclude_col
         if ratio < max_ratio and num_unique <= max_categories:
             df[col] = df[col].astype('category')
             columnas_convertidas.append(col)
-            
-    print(f"✅ Se convirtieron {len(columnas_convertidas)} columnas a 'category':")
-    if columnas_convertidas:
-        print(f"   -> {', '.join(columnas_convertidas)}")
         
     return df

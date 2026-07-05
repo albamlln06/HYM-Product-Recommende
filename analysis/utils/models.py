@@ -6,8 +6,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 import xgboost as xgb
-from preprocess import auto_optimize_categories, imputar_nulos_tfm
-
+from utils.preprocess import auto_optimize_categories, imputar_nulos_tfm
 
 CATEGORICAL_FEATURES_CLUSTER = [
     'product_group_name',
@@ -68,7 +67,7 @@ def compute_article_features(df_customers, df_products, df_transactions):
         df_transactions.groupby("article_id").agg(
             avg_price=("price", "mean"),
             sales_volume=("article_id", "count"),
-            online_ratio=("is_online", "mean")
+            online_ratio=("is_online", "mean"),
             recency_days=("t_dat", lambda x: (max_date - x.max()).days),
         ).reset_index()
     )
@@ -158,7 +157,7 @@ def clustering_preprocess_old(df_customers, df_products, df_transactions):
 
     return X_final, article_ids, scaler, df
 
-def compute_user_features(df_customers, df_transactions):
+def compute_user_features(df_customers, df_transactions,df_products):
     #Solo para XGBoost
     """Features de usuario calculadas SOLO con transacciones de train."""
     user_tx = df_transactions.groupby("customer_id").agg(
@@ -174,7 +173,21 @@ def compute_user_features(df_customers, df_transactions):
  
     if "age" in user_df.columns:
         user_df["age"] = user_df["age"].fillna(user_df["age"].median())
- 
+    
+    tx_sections = df_transactions[['customer_id', 'article_id']].merge(
+        df_products[['article_id', 'section_name']], on='article_id', how='left'
+    )
+    
+    # 2. Contamos cuántas veces ha comprado en cada sección
+    section_counts = tx_sections.groupby(['customer_id', 'section_name']).size().reset_index(name='count')
+    
+    # 3. Ordenamos y nos quedamos solo con la primera (la más comprada) por cliente
+    favorite_section = section_counts.sort_values('count', ascending=False).drop_duplicates('customer_id')
+    favorite_section = favorite_section.rename(columns={'section_name': 'user_favorite_section'})
+    favorite_section = favorite_section[['customer_id', 'user_favorite_section']]
+    
+    # Unimos todo al df de usuario
+    user_df = user_df.merge(favorite_section, on="customer_id", how="left")
     return user_df
 
 # def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
@@ -451,8 +464,6 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
     #imputamos los nulos
     dataset = imputar_nulos_tfm(dataset)
     #Convertimos los textos a categorías para ahorrar memoria RAM
-    dataset = auto_optimize_categories(dataset,
-                                       exclude_cols=['customer_id', 'article_id', 'label'])
     # 6. Separar X e y
     cols_no_feature = ['customer_id', 'article_id', 'label']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]
