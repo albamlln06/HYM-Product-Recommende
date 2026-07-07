@@ -25,7 +25,7 @@ TOP_N = 12
 app = FastAPI(title="Panel de recomendación de productos")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5174"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
