@@ -169,7 +169,7 @@ def clustering_preprocess_old(df_customers, df_products, df_transactions):
 
     return X_final, article_ids, scaler, df
 
-def compute_user_features(df_customers, df_transactions,df_products):
+def compute_user_features(df_customers, df_transactions, df_products):
     #Solo para XGBoost
     """Features de usuario calculadas SOLO con transacciones de train."""
     max_date = df_transactions['t_dat'].max()
@@ -206,6 +206,7 @@ def compute_user_features(df_customers, df_transactions,df_products):
     # Unimos todo al df de usuario
     user_df = user_df.merge(favorite_section, on="customer_id", how="left")
     return user_df
+
 def compute_cross_features(dataset):
     """
     Calcula variables que relacionan al cliente con el artículo específico.
@@ -227,88 +228,8 @@ def compute_cross_features(dataset):
     if 'section_name' in dataset.columns and 'user_favorite_section' in dataset.columns:
         # 1 si es su sección favorita, 0 si no
         dataset['cross_is_favorite_section'] = (dataset['section_name'] == dataset['user_favorite_section']).astype('int8')
-        
-    
 
     return dataset
-
-# def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
-#     """
-#     Construye el dataset (X, y) listo para entrenar un XGBClassifier.
- 
-#     Reutiliza compute_article_features() para no duplicar lógica con
-#     clustering_preprocess(). Añade:
-#       - features de usuario,
-#       - negative sampling ponderado por popularidad (sales_volume),
-#       - el join final usuario x artículo con label 0/1.
- 
-#     df_transactions DEBE ser solo train (mismo cuidado que en clustering_preprocess).
- 
-#     Devuelve:
-#       X (DataFrame de features, con nombres de columna -> útil para
-#          feature_importances_), y (Serie de labels), dataset (DataFrame
-#          completo con customer_id/article_id/label + features, por si
-#          quieres inspeccionarlo), article_df (salida de
-#          compute_article_features, reutilizable para generar candidatos).
-#     """
-#     rng = np.random.default_rng(random_state)
- 
-#     # --- Features de artículo (compartidas con clustering) ---
-#     article_df = compute_article_features(df_customers, df_products, df_transactions)
- 
-#     available_cat = [c for c in CATEGORICAL_FEATURES_CLUSTER if c in article_df.columns]
-#     article_encoded = pd.get_dummies(article_df[available_cat], drop_first=False, dummy_na=True)
-#     article_features = pd.concat(
-#         [article_df[["article_id"] + NUMERIC_FEATURES_CLUSTER], article_encoded],
-#         axis=1,
-#     )
- 
-#     # --- Features de usuario ---
-#     user_features = compute_user_features(df_customers, df_transactions)
-#     cat_user = [c for c in ["club_member_status"] if c in user_features.columns]
-#     if cat_user:
-#         user_features = pd.get_dummies(user_features, columns=cat_user, dummy_na=True)
- 
-#     # --- Negative sampling ponderado por popularidad ---
-#     todos_los_articulos = article_features["article_id"].values
-#     popularidad = article_df.set_index("article_id").loc[todos_los_articulos, "sales_volume"].values
-#     popularidad = np.where(popularidad <= 0, 1, popularidad)  # evita prob=0 para todos
-#     prob_muestreo = popularidad / popularidad.sum()
- 
-#     compras_por_cliente = df_transactions.groupby("customer_id")["article_id"].apply(set).to_dict()
- 
-#     positivos = df_transactions[["customer_id", "article_id"]].drop_duplicates().copy()
-#     positivos["label"] = 1
- 
-#     negativos_rows = []
-#     for cliente, grupo in positivos.groupby("customer_id"):
-#         comprados = compras_por_cliente.get(cliente, set())
-#         n_necesarios = len(grupo) * n_negativos_por_positivo
-#         intentos = 0
-#         n_generados = 0
-#         while n_generados < n_necesarios and intentos < n_necesarios * 5:
-#             candidatos = rng.choice(todos_los_articulos, size=min(50, n_necesarios), p=prob_muestreo)
-#             intentos += len(candidatos)
-#             for c in candidatos:
-#                 if c not in comprados:
-#                     negativos_rows.append({"customer_id": cliente, "article_id": c, "label": 0})
-#                     n_generados += 1
-#                     if n_generados >= n_necesarios:
-#                         break
- 
-#     negativos = pd.DataFrame(negativos_rows)
- 
-#     dataset = pd.concat([positivos, negativos], ignore_index=True)
-#     dataset = dataset.merge(user_features, on="customer_id", how="left")
-#     dataset = dataset.merge(article_features, on="article_id", how="left")
- 
-#     cols_no_feature = ["customer_id", "article_id", "label"]
-#     feature_cols = [c for c in dataset.columns if c not in cols_no_feature]
- 
-#     X = dataset[feature_cols]
-#     y = dataset["label"]
- 
-#     return X, y, dataset, article_features, user_features
 
 
 def find_optimal_k(X_final, k_range=range(2, 15)):
@@ -440,12 +361,56 @@ def recommend_by_cluster_similarity(
 # MODELO XGBOOST
 # ==========================================
 
+def generar_negativos_cliente(
+    positivos_cliente,
+    cliente,
+    compras_por_cliente,
+    todos_los_articulos,
+    prob_muestreo,
+    n_negativos_por_positivo,
+    rng,
+):
+    
+    comprados = compras_por_cliente.get(cliente, set())
+
+    n_necesarios = len(positivos_cliente) * n_negativos_por_positivo
+    n_generados = 0
+    intentos = 0
+    batch_size = min(n_necesarios * 3, len(todos_los_articulos))
+
+    negativos = []
+
+    while n_generados < n_necesarios and intentos < n_necesarios * 20:
+        candidatos = rng.choice(
+            todos_los_articulos,
+            size=batch_size,
+            p=prob_muestreo,
+            replace=False
+        )
+
+        intentos += len(candidatos)
+
+        for c in candidatos:
+            if c not in comprados:
+                negativos.append({
+                    "customer_id": cliente,
+                    "article_id": c,
+                    "label": 0,
+                })
+
+                n_generados += 1
+
+                if n_generados >= n_necesarios:
+                    break
+
+    return negativos
+
 def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
     rng = np.random.default_rng(random_state)
 
     # 1. Features de artículo y usuario
     article_df = compute_article_features(df_customers, df_products, df_transactions)
-    user_df    = compute_user_features(df_customers, df_transactions)
+    user_df    = compute_user_features(df_customers, df_transactions, df_products)
 
     # 2. Muestras positivas: pares únicos (cliente, artículo) realmente comprados
     positivos = df_transactions[['customer_id', 'article_id']].drop_duplicates().copy()
@@ -460,47 +425,34 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
     )
     popularidad = np.where(popularidad <= 0, 1, popularidad)
     prob_muestreo = popularidad / popularidad.sum()
-
     compras_por_cliente = (
         df_transactions.groupby('customer_id')['article_id'].apply(set).to_dict()
     )
 
     negativos_rows = []
     for cliente, grupo in positivos.groupby('customer_id'):
-        comprados  = compras_por_cliente.get(cliente, set())
-        n_necesarios = len(grupo) * n_negativos_por_positivo
-        n_generados  = 0
-        intentos     = 0
-        batch_size   = min(n_necesarios * 3, len(todos_los_articulos))
-        while n_generados < n_necesarios and intentos < n_necesarios * 20:
-            candidatos = rng.choice(todos_los_articulos, size=batch_size, p=prob_muestreo, replace=False)
-            intentos  += len(candidatos)
-            for c in candidatos:
-                if c not in comprados:
-                    negativos_rows.append({'customer_id': cliente, 'article_id': c, 'label': 0})
-                    n_generados += 1
-                    if n_generados >= n_necesarios:
-                        break
-
+        negativos_rows.extend(
+            generar_negativos_cliente(
+                positivos_cliente=grupo,
+                cliente=cliente,
+                compras_por_cliente=compras_por_cliente,
+                todos_los_articulos=todos_los_articulos,
+                prob_muestreo=prob_muestreo,
+                n_negativos_por_positivo=n_negativos_por_positivo,
+                rng=rng,
+            )
+        )
     negativos = pd.DataFrame(negativos_rows)
+
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
 
-    # 4. Encoding de categóricas de usuario y artículo
-    cat_user = [c for c in ['club_member_status'] if c in user_df.columns]
-    if cat_user:
-        user_df = pd.get_dummies(user_df, columns=cat_user, dummy_na=False)
-
-    available_cat   = [c for c in CATEGORICAL_FEATURES_XGBOOST if c in article_df.columns]
-    article_encoded = pd.get_dummies(
-        article_df[['article_id'] + available_cat + NUMERIC_FEATURES_XGBOOST],
-        columns=available_cat,
-        dummy_na=False,
-    )
+    # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
+    user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df)
 
     # 5. Join final: dataset × features de usuario × features de artículo
     dataset = (
         dataset
-        .merge(user_df,       on='customer_id', how='left')
+        .merge(user_encoded,       on='customer_id', how='left')
         .merge(article_encoded, on='article_id',  how='left')
     )
     #imputamos los nulos
@@ -513,10 +465,54 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
     X = dataset[feature_cols].fillna(0).astype(float)
     y = dataset['label']
 
-    print(f"Positivos: {len(positivos):,}  |  Negativos: {len(negativos_rows):,}")
+    print(f"Positivos: {len(positivos):,}  |  Negativos: {len(negativos):,}")
     print(f"X shape: {X.shape}  |  Features: {len(feature_cols)}")
 
     return X, y, dataset, article_df, user_df
+
+
+def encode_xgboost_categoricals(user_df, article_df):
+    """
+    Aplica el one-hot encoding de usuario y artículo usado por XGBoost.
+
+    Se comparte entre xgboost_preprocess (entrenamiento) y el servido en vivo
+    de recomendaciones, para que ambos generen exactamente las mismas columnas.
+    """
+    cat_user = [c for c in ['club_member_status', 'user_favorite_section'] if c in user_df.columns]
+    user_encoded = pd.get_dummies(user_df, columns=cat_user, dummy_na=False) if cat_user else user_df.copy()
+
+    available_cat = [c for c in CATEGORICAL_FEATURES_XGBOOST if c in article_df.columns]
+    article_encoded = pd.get_dummies(
+        article_df[['article_id'] + available_cat + NUMERIC_FEATURES_XGBOOST],
+        columns=available_cat,
+        dummy_na=False,
+    )
+    return user_encoded, article_encoded
+
+
+def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols, top_n=12):
+    """
+    Rankea un pool fijo de artículos candidatos para un usuario con un XGBClassifier ya entrenado.
+
+    user_features : dict o Series con las features de UN usuario, ya codificadas
+                    (salida de encode_xgboost_categoricals para ese customer_id).
+    candidate_df  : DataFrame con columna 'article_id' + features de artículo codificadas
+                    (el 'article_encoded' de encode_xgboost_categoricals, filtrado al pool
+                    de candidatos, p.ej. los artículos más vendidos).
+    feature_cols  : columnas exactas usadas en el entrenamiento (X.columns de xgboost_preprocess),
+                    para alinear el orden/presencia de columnas en la inferencia.
+    """
+    n = len(candidate_df)
+    user_block = pd.DataFrame([user_features] * n).reset_index(drop=True)
+    article_block = candidate_df.reset_index(drop=True)
+
+    combined = pd.concat([user_block, article_block], axis=1)
+    X_infer = combined.reindex(columns=feature_cols, fill_value=0).fillna(0).astype(float)
+
+    scores = model.predict_proba(X_infer)[:, 1]
+
+    ranked = candidate_df.assign(score=scores).sort_values('score', ascending=False)
+    return ranked.head(top_n)[['article_id', 'score']].reset_index(drop=True)
 
 
 # ==========================================
