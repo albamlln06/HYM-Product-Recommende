@@ -9,10 +9,12 @@ import sys
 from pathlib import Path
 
 import joblib
+import mlflow
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from mlflow.exceptions import MlflowException
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
@@ -21,6 +23,25 @@ sys.path.insert(0, str(BASE_DIR / "analysis"))
 from utils import models  # noqa: E402
 
 TOP_N = 12
+MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
+MLFLOW_DB_PATH = Path(__file__).resolve().parent / "mlflow.db"
+mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB_PATH}")
+
+# Prefijo de run_name -> familia de modelo, para colorear/agrupar la evolución
+RUN_NAME_FAMILIES = [
+    ("baseline_random", "Random"),
+    ("baseline_popular", "Popular"),
+    ("cluster_kmeans", "Cluster"),
+    ("xgb", "XGBoost"),
+]
+
+
+def run_family(run_name: str) -> str:
+    name = (run_name or "").lower()
+    for prefix, family in RUN_NAME_FAMILIES:
+        if name.startswith(prefix):
+            return family
+    return "Otro"
 
 app = FastAPI(title="Panel de recomendación de productos")
 app.add_middleware(
@@ -78,6 +99,37 @@ def article_cards(article_ids):
 @app.get("/api/metrics")
 def get_metrics():
     return metrics_payload
+
+
+@app.get("/api/mlflow/runs")
+def get_mlflow_runs():
+    try:
+        runs_df = mlflow.search_runs(experiment_names=[MLFLOW_EXPERIMENT_NAME], order_by=["start_time ASC"])
+    except MlflowException:
+        return {"runs": []}
+    if runs_df.empty:
+        return {"runs": []}
+
+    param_cols = [c for c in runs_df.columns if c.startswith("params.")]
+    runs = []
+    for _, row in runs_df.iterrows():
+        run_name = row.get("tags.mlflow.runName") or row["run_id"][:8]
+        map12 = row.get("metrics.map12")
+        start_time = row.get("start_time")
+        runs.append({
+            "run_id": row["run_id"],
+            "run_name": run_name,
+            "family": run_family(run_name),
+            "status": row["status"],
+            "start_time": start_time.isoformat() if pd.notna(start_time) else None,
+            "map12": float(map12) if pd.notna(map12) else None,
+            "params": {
+                c.removeprefix("params."): row[c]
+                for c in param_cols
+                if pd.notna(row[c])
+            },
+        })
+    return {"runs": runs}
 
 
 @app.get("/api/customers")

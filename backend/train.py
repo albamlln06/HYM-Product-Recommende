@@ -30,27 +30,29 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 sys.path.insert(0, str(BASE_DIR / "analysis"))
 
-from utils import preprocess, models  # noqa: E402
+from utils import preprocess, models
 
-# --- Configuración de la muestra (mismo espíritu que los notebooks) ---
-N_CUSTOMERS = 4000
-MIN_PURCHASES = 2
+N_CUSTOMERS = 200
+MIN_PURCHASES = 3
 MAX_MONTHS_SINCE_LAST_PURCHASE = 12
-K_EVAL = 12                 # top-K para MAP@12 y para las recomendaciones servidas
+#Productos que se van a recomendar (nº)
+K_EVAL = 12
+#Semilla                 
 RANDOM_STATE = 42
 
 # --- Hiperparámetros del modelo de clustering ---
 K_CLUSTERS = 8
 
 # --- Hiperparámetros del modelo XGBoost ---
-CANDIDATE_POOL_SIZE = 120000  # nº de artículos más vendidos usados como pool de candidatos
+CANDIDATE_POOL_SIZE = 120000  # nº de artículos usados para el entrenamiento
 N_NEGATIVOS_POR_POSITIVO = 8
 XGB_N_ESTIMATORS = 300
 XGB_MAX_DEPTH = 6
 XGB_LEARNING_RATE = 0.05
 
 # --- MLflow ---
-MLFLOW_EXPERIMENT_NAME = "hym-recomendador"
+MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
+MLFLOW_TRACKING_URI = f"sqlite:///{Path(__file__).resolve().parent / 'mlflow.db'}"
 
 
 def leave_one_out_split(df_transactions):
@@ -71,11 +73,13 @@ def leave_one_out_split(df_transactions):
     return df_train, df_test, eval_users, actual
 
 
-def entrenar_modelo_random(df_train, eval_users, actual, k_eval=12, seed=42):
+def entrenar_modelo_random(df_train, eval_users, actual, k_eval=12, seed=42, run_name="baseline_random", extra_params=None):
     """Baseline: recomienda artículos al azar. Sirve para tener un suelo de referencia."""
-    with mlflow.start_run(run_name="baseline_random"):
-        mlflow.log_param("k_eval", k_eval)
-        mlflow.log_param("seed", seed)
+    with mlflow.start_run(run_name=run_name):
+        params = {"k_eval": k_eval, "seed": seed}
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
 
         predicciones = models.predict_random(df_train, eval_users, k=k_eval, seed=seed)
         map12 = models.mapk(actual, predicciones, k=k_eval)
@@ -86,10 +90,13 @@ def entrenar_modelo_random(df_train, eval_users, actual, k_eval=12, seed=42):
     return predicciones, map12
 
 
-def entrenar_modelo_popular(df_train, eval_users, actual, k_eval=12):
+def entrenar_modelo_popular(df_train, eval_users, actual, k_eval=12, run_name="baseline_popular", extra_params=None):
     """Baseline: recomienda a todo el mundo los artículos más vendidos."""
-    with mlflow.start_run(run_name="baseline_popular"):
-        mlflow.log_param("k_eval", k_eval)
+    with mlflow.start_run(run_name=run_name):
+        params = {"k_eval": k_eval}
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
 
         predicciones = models.predict_popular(df_train, eval_users, k=k_eval)
         map12 = models.mapk(actual, predicciones, k=k_eval)
@@ -103,11 +110,14 @@ def entrenar_modelo_popular(df_train, eval_users, actual, k_eval=12):
 def entrenar_modelo_cluster(
     df_customers, df_products, df_train, eval_users, actual,
     k_clusters=8, k_eval=12, random_state=42,
+    run_name="cluster_kmeans", extra_params=None,
 ):
     """Entrena el modelo de clustering (KMeans + similitud coseno) y lo registra en MLflow."""
-    with mlflow.start_run(run_name="cluster_kmeans"):
-        mlflow.log_param("k_clusters", k_clusters)
-        mlflow.log_param("random_state", random_state)
+    with mlflow.start_run(run_name=run_name):
+        params = {"k_clusters": k_clusters, "random_state": random_state}
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
 
         X_final, article_ids, scaler, df_products_enriched = models.clustering_preprocess(
             df_customers, df_products, df_train
@@ -146,17 +156,30 @@ def entrenar_modelo_xgboost(
     n_estimators=300, max_depth=6, learning_rate=0.05,
     n_negativos_por_positivo=8, candidate_pool_size=120000,
     k_eval=12, random_state=42,
+    run_name="xgboost", extra_params=None,
 ):
-    """Entrena el modelo de ranking XGBoost y lo registra en MLflow."""
-    with mlflow.start_run(run_name="xgboost"):
-        mlflow.log_params({
+    """
+    Entrena el modelo de ranking XGBoost y lo registra en MLflow.
+
+    run_name    : nombre del run en MLflow. Al hacer pruebas conviene poner
+                  algo descriptivo (p.ej. "xgb_n300_d6_lr0.05") para
+                  distinguir cada combinación de un vistazo en la UI.
+    extra_params: dict opcional con parámetros que NO afectan a esta función
+                  pero que quieres dejar registrados en MLflow para saber
+                  con qué datos se entrenó (p.ej. nº de clientes usados).
+    """
+    with mlflow.start_run(run_name=run_name):
+        params = {
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
             "n_negativos_por_positivo": n_negativos_por_positivo,
             "candidate_pool_size": candidate_pool_size,
             "random_state": random_state,
-        })
+        }
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
 
         X, y, dataset, article_df, user_df = models.xgboost_preprocess(
             df_customers, df_products, df_train,
@@ -193,7 +216,7 @@ def entrenar_modelo_xgboost(
         mlflow.log_metric("map12", map12)
         mlflow.xgboost.log_model(xgb_model, name="xgboost_model")
 
-        print(f"[XGBoost] MAP@12 = {map12:.4f}")
+        print(f"[XGBoost] {run_name} -> MAP@12 = {map12:.4f}  |  params={params}")
 
     resultado = {
         "xgb_model": xgb_model,
@@ -208,7 +231,7 @@ def entrenar_modelo_xgboost(
 
 
 def main():
-    mlflow.set_tracking_uri(f"file:{BASE_DIR / 'mlruns'}")
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
     print(f"Cargando muestra de {N_CUSTOMERS} clientes...")
@@ -224,13 +247,29 @@ def main():
     print(f"Usuarios de evaluación: {len(eval_users):,}  |  train: {len(df_train):,}  |  test: {len(df_test):,}")
 
     # --- Entrenamiento de cada modelo (cada uno queda registrado en MLflow) ---
-    _, map_random = entrenar_modelo_random(df_train, eval_users, actual, k_eval=K_EVAL, seed=RANDOM_STATE)
-    _, map_popular = entrenar_modelo_popular(df_train, eval_users, actual, k_eval=K_EVAL)
+    # data_config identifica la muestra (nº de clientes + filtro de actividad) para
+    # poder comparar los 4 modelos entre sí en igualdad de condiciones (ver
+    # experiment_xgboost.py, que reentrena estos mismos baselines por cada
+    # combinación de datos que prueba).
+    extra_params_datos = {
+        "n_customers": N_CUSTOMERS,
+        "min_purchases": MIN_PURCHASES,
+        "max_months_since_last_purchase": MAX_MONTHS_SINCE_LAST_PURCHASE,
+        "data_config": f"cust{N_CUSTOMERS}_minp{MIN_PURCHASES}_maxm{MAX_MONTHS_SINCE_LAST_PURCHASE}",
+    }
+
+    _, map_random = entrenar_modelo_random(
+        df_train, eval_users, actual, k_eval=K_EVAL, seed=RANDOM_STATE, extra_params=extra_params_datos,
+    )
+    _, map_popular = entrenar_modelo_popular(
+        df_train, eval_users, actual, k_eval=K_EVAL, extra_params=extra_params_datos,
+    )
 
     print("Entrenando modelo de clustering...")
     resultado_cluster = entrenar_modelo_cluster(
         df_customers, df_products, df_train, eval_users, actual,
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
+        extra_params=extra_params_datos,
     )
 
     print("Entrenando modelo XGBoost...")
@@ -238,7 +277,7 @@ def main():
         df_customers, df_products, df_train, eval_users, actual,
         n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH, learning_rate=XGB_LEARNING_RATE,
         n_negativos_por_positivo=N_NEGATIVOS_POR_POSITIVO, candidate_pool_size=CANDIDATE_POOL_SIZE,
-        k_eval=K_EVAL, random_state=RANDOM_STATE,
+        k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,
     )
 
     # --- Métricas ---

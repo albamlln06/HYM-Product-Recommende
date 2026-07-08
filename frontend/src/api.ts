@@ -40,6 +40,20 @@ export interface CustomerRecommendations {
   recomendaciones_xgboost: ArticleCard[];
 }
 
+export interface MlflowRun {
+  run_id: string;
+  run_name: string;
+  family: string;
+  status: string;
+  start_time: string | null;
+  map12: number | null;
+  params: Record<string, string>;
+}
+
+export interface MlflowRunsResponse {
+  runs: MlflowRun[];
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_URL}${path}`);
   if (!res.ok) {
@@ -61,4 +75,8 @@ export function searchCustomers(query: string): Promise<CustomerSummary[]> {
 
 export function getCustomerRecommendations(customerId: string): Promise<CustomerRecommendations> {
   return fetchJson(`/api/customers/${encodeURIComponent(customerId)}`);
+}
+
+export function getMlflowRuns(): Promise<MlflowRunsResponse> {
+  return fetchJson("/api/mlflow/runs");
 }
