@@ -54,6 +54,56 @@ XGB_LEARNING_RATE = 0.05
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
 MLFLOW_TRACKING_URI = f"sqlite:///{Path(__file__).resolve().parent / 'mlflow.db'}"
 
+# ------------------------------------------------------------------ #
+# Experimentos XGBoost: cada entrada = 1 run en MLflow.              #
+# Edita esta lista para añadir/quitar features o cambiar             #
+# hiperparámetros sin tocar el resto del código.                     #
+# ------------------------------------------------------------------ #
+XGBOOST_EXPERIMENTS = [
+    {
+        "run_name": "xgb_all_features",
+        "feature_config": None,   # None → usa FEATURE_CONFIG_DEFAULT (todas las features)
+        "hyperparams": {
+            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
+            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+        },
+    },
+    {
+        "run_name": "xgb_no_categorical",
+        "feature_config": {
+            "article_numeric":    ["avg_buyer_age", "avg_price", "sales_volume", "online_ratio", "recency_days", "sex_popularity", "total_sales_volume"],
+            "article_categorical": [],
+            "user_numeric":       ["user_n_compras", "user_precio_medio", "user_precio_std", "user_online_ratio", "age"],
+            "user_categorical":   [],
+        },
+        "hyperparams": {
+            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
+            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+        },
+    },
+    {
+        "run_name": "xgb_article_only",
+        "feature_config": {
+            "article_numeric":    ["avg_buyer_age", "avg_price", "sales_volume", "online_ratio", "recency_days", "sex_popularity", "total_sales_volume"],
+            "article_categorical": ["product_group_name", "index_group_name", "garment_group_name"],
+            "user_numeric":       [],
+            "user_categorical":   [],
+        },
+        "hyperparams": {
+            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
+            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+        },
+    },
+    {
+        "run_name": "xgb_deeper",
+        "feature_config": None,
+        "hyperparams": {
+            "n_estimators": 500, "max_depth": 8, "learning_rate": 0.03,
+            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+        },
+    },
+]
+
 
 def leave_one_out_split(df_transactions):
     last_purchase_idx = df_transactions.groupby("customer_id")["t_dat"].idxmax()
@@ -156,17 +206,15 @@ def entrenar_modelo_xgboost(
     n_estimators=300, max_depth=6, learning_rate=0.05,
     n_negativos_por_positivo=8, candidate_pool_size=120000,
     k_eval=12, random_state=42,
-    run_name="xgboost", extra_params=None,
+    run_name="xgboost", feature_config=None, extra_params=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
 
-    run_name    : nombre del run en MLflow. Al hacer pruebas conviene poner
-                  algo descriptivo (p.ej. "xgb_n300_d6_lr0.05") para
-                  distinguir cada combinación de un vistazo en la UI.
-    extra_params: dict opcional con parámetros que NO afectan a esta función
-                  pero que quieres dejar registrados en MLflow para saber
-                  con qué datos se entrenó (p.ej. nº de clientes usados).
+    run_name      : nombre del run. Usa algo descriptivo para comparar en la UI.
+    feature_config: dict con claves article_numeric, article_categorical,
+                    user_numeric, user_categorical. None → FEATURE_CONFIG_DEFAULT.
+    extra_params  : params adicionales para MLflow (p.ej. config de datos).
     """
     with mlflow.start_run(run_name=run_name):
         params = {
@@ -181,9 +229,18 @@ def entrenar_modelo_xgboost(
             params.update(extra_params)
         mlflow.log_params(params)
 
+        # Loguear qué features se usan en este experimento
+        cfg = feature_config or models.FEATURE_CONFIG_DEFAULT
+        mlflow.log_param("features_article_numeric",    cfg["article_numeric"])
+        mlflow.log_param("features_article_categorical", cfg["article_categorical"])
+        mlflow.log_param("features_user_numeric",       cfg["user_numeric"])
+        mlflow.log_param("features_user_categorical",   cfg["user_categorical"])
+
         X, y, dataset, article_df, user_df = models.xgboost_preprocess(
             df_customers, df_products, df_train,
-            n_negativos_por_positivo=n_negativos_por_positivo, random_state=random_state,
+            n_negativos_por_positivo=n_negativos_por_positivo,
+            random_state=random_state,
+            feature_config=feature_config,
         )
         feature_cols = list(X.columns)
 
@@ -230,6 +287,46 @@ def entrenar_modelo_xgboost(
     return resultado
 
 
+def run_xgboost_experiments(
+    df_customers, df_products, df_train, eval_users, actual,
+    experiments=None, candidate_pool_size=None, k_eval=None,
+    random_state=None, extra_params=None,
+):
+    """
+    Ejecuta todos los experimentos de XGBOOST_EXPERIMENTS (o la lista que pases)
+    y devuelve un dict {run_name: resultado} ordenado por MAP@12 descendente.
+    """
+    experiments       = experiments       or XGBOOST_EXPERIMENTS
+    candidate_pool_size = candidate_pool_size or CANDIDATE_POOL_SIZE
+    k_eval            = k_eval            or K_EVAL
+    random_state      = random_state      or RANDOM_STATE
+
+    resultados = {}
+    for exp in experiments:
+        hp = exp["hyperparams"]
+        print(f"\n→ Experimento: {exp['run_name']}")
+        resultado = entrenar_modelo_xgboost(
+            df_customers, df_products, df_train, eval_users, actual,
+            n_estimators=hp.get("n_estimators", XGB_N_ESTIMATORS),
+            max_depth=hp.get("max_depth", XGB_MAX_DEPTH),
+            learning_rate=hp.get("learning_rate", XGB_LEARNING_RATE),
+            n_negativos_por_positivo=hp.get("n_negativos_por_positivo", N_NEGATIVOS_POR_POSITIVO),
+            candidate_pool_size=candidate_pool_size,
+            k_eval=k_eval,
+            random_state=random_state,
+            run_name=exp["run_name"],
+            feature_config=exp.get("feature_config"),
+            extra_params=extra_params,
+        )
+        resultados[exp["run_name"]] = resultado
+
+    print("\n=== Resumen experimentos XGBoost ===")
+    for name, res in sorted(resultados.items(), key=lambda x: -x[1]["map12"]):
+        print(f"  {name:<30} MAP@12 = {res['map12']:.4f}")
+
+    return resultados
+
+
 def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
@@ -272,13 +369,13 @@ def main():
         extra_params=extra_params_datos,
     )
 
-    print("Entrenando modelo XGBoost...")
-    resultado_xgboost = entrenar_modelo_xgboost(
+    print("Entrenando experimentos XGBoost...")
+    resultados_xgb = run_xgboost_experiments(
         df_customers, df_products, df_train, eval_users, actual,
-        n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH, learning_rate=XGB_LEARNING_RATE,
-        n_negativos_por_positivo=N_NEGATIVOS_POR_POSITIVO, candidate_pool_size=CANDIDATE_POOL_SIZE,
-        k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,
+        extra_params=extra_params_datos,
     )
+    # El mejor experimento (mayor MAP@12) se usa para guardar artefactos
+    resultado_xgboost = max(resultados_xgb.values(), key=lambda r: r["map12"])
 
     # --- Métricas ---
     raw_metrics = {

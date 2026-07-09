@@ -47,6 +47,26 @@ NUMERIC_FEATURES_XGBOOST = [
     'total_sales_volume',
 ]
 
+USER_NUMERIC_FEATURES = [
+    'user_n_compras',
+    'user_precio_medio',
+    'user_precio_std',
+    'user_online_ratio',
+    'age',
+]
+
+USER_CATEGORICAL_FEATURES = ['club_member_status']
+
+# Config por defecto: todas las features disponibles.
+# Pasa una copia modificada a xgboost_preprocess / entrenar_modelo_xgboost
+# para probar distintas combinaciones sin tocar estas listas.
+FEATURE_CONFIG_DEFAULT = {
+    "article_numeric":    NUMERIC_FEATURES_XGBOOST,
+    "article_categorical": CATEGORICAL_FEATURES_XGBOOST,
+    "user_numeric":       USER_NUMERIC_FEATURES,
+    "user_categorical":   USER_CATEGORICAL_FEATURES,
+}
+
 def compute_article_features(df_customers, df_products, df_transactions):
     """
     Calcula features agregadas por article_id a partir de transacciones.
@@ -405,7 +425,7 @@ def generar_negativos_cliente(
 
     return negativos
 
-def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
+def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42, feature_config=None):
     rng = np.random.default_rng(random_state)
 
     # 1. Features de artículo y usuario
@@ -447,7 +467,7 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
 
     # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
-    user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df)
+    user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df, feature_config)
 
     # 5. Join final: dataset × features de usuario × features de artículo
     dataset = (
@@ -471,22 +491,33 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
     return X, y, dataset, article_df, user_df
 
 
-def encode_xgboost_categoricals(user_df, article_df):
+def encode_xgboost_categoricals(user_df, article_df, feature_config=None):
     """
     Aplica el one-hot encoding de usuario y artículo usado por XGBoost.
 
     Se comparte entre xgboost_preprocess (entrenamiento) y el servido en vivo
     de recomendaciones, para que ambos generen exactamente las mismas columnas.
+    Acepta feature_config para controlar qué features se incluyen.
     """
-    cat_user = [c for c in ['club_member_status', 'user_favorite_section'] if c in user_df.columns]
-    user_encoded = pd.get_dummies(user_df, columns=cat_user, dummy_na=False) if cat_user else user_df.copy()
+    if feature_config is None:
+        feature_config = FEATURE_CONFIG_DEFAULT
 
-    available_cat = [c for c in CATEGORICAL_FEATURES_XGBOOST if c in article_df.columns]
-    article_encoded = pd.get_dummies(
-        article_df[['article_id'] + available_cat + NUMERIC_FEATURES_XGBOOST],
-        columns=available_cat,
-        dummy_na=False,
+    # --- Usuario ---
+    user_num = [c for c in feature_config["user_numeric"] if c in user_df.columns]
+    user_cat = [c for c in feature_config["user_categorical"] if c in user_df.columns]
+    user_sub = user_df[["customer_id"] + user_num + user_cat].copy()
+    user_encoded = (
+        pd.get_dummies(user_sub, columns=user_cat, dummy_na=False) if user_cat else user_sub
     )
+
+    # --- Artículo ---
+    art_num = [c for c in feature_config["article_numeric"] if c in article_df.columns]
+    art_cat = [c for c in feature_config["article_categorical"] if c in article_df.columns]
+    article_sub = article_df[["article_id"] + art_num + art_cat].copy()
+    article_encoded = (
+        pd.get_dummies(article_sub, columns=art_cat, dummy_na=False) if art_cat else article_sub
+    )
+
     return user_encoded, article_encoded
 
 
