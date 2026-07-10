@@ -67,6 +67,12 @@ FEATURE_CONFIG_DEFAULT = {
     "user_categorical":   USER_CATEGORICAL_FEATURES,
 }
 
+# Pesos por categoría para el entrenamiento de XGBoost (sample_weight).
+# 1.0 = sin cambios. Un valor < 1.0 hace que esas filas influyan menos en la
+# función de pérdida (p.ej. bajar la importancia de la ropa interior en el
+# ranking); > 1.0 las prioriza. None / dict vacío -> todas las filas pesan igual.
+CATEGORY_WEIGHTS_DEFAULT = None
+
 def compute_article_features(df_customers, df_products, df_transactions):
     """
     Calcula features agregadas por article_id a partir de transacciones.
@@ -425,7 +431,33 @@ def generar_negativos_cliente(
 
     return negativos
 
-def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42, feature_config=None):
+def compute_category_sample_weights(dataset, article_df, category_weights=None, default_weight=1.0):
+    """
+    Calcula el sample_weight de cada fila del dataset de entrenamiento de
+    XGBoost según la categoría del artículo (positivo o negativo muestreado).
+
+    category_weights: dict {columna_categorica: {valor: peso}}, p.ej.
+        {"product_group_name": {"Underwear": 0.3, "Underwear/nightwear": 0.3}}
+    hace que las filas de ropa interior pesen un 30% en la función de pérdida.
+    Los valores no listados (o columnas ausentes en article_df) usan
+    default_weight. Si se configura más de una columna, los pesos se
+    multiplican entre sí.
+    """
+    weights = pd.Series(default_weight, index=dataset.index, dtype=float)
+    if not category_weights:
+        return weights
+
+    article_categories = article_df.set_index('article_id')
+    for category_col, value_weights in category_weights.items():
+        if category_col not in article_categories.columns:
+            continue
+        col_values = dataset['article_id'].map(article_categories[category_col])
+        weights *= col_values.map(value_weights).fillna(default_weight)
+
+    return weights
+
+
+def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42, feature_config=None, category_weights=None):
     rng = np.random.default_rng(random_state)
 
     # 1. Features de artículo y usuario
@@ -466,6 +498,10 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
 
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
 
+    # 3b. Peso de cada fila según la categoría del artículo (p.ej. bajar el
+    #     peso de la ropa interior). None -> todas las filas pesan 1.0.
+    dataset['sample_weight'] = compute_category_sample_weights(dataset, article_df, category_weights)
+
     # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
     user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df, feature_config)
 
@@ -479,16 +515,17 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
     dataset = imputar_nulos_tfm(dataset)
     #Convertimos los textos a categorías para ahorrar memoria RAM
     # 6. Separar X e y
-    cols_no_feature = ['customer_id', 'article_id', 'label']
+    cols_no_feature = ['customer_id', 'article_id', 'label', 'sample_weight']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]
 
     X = dataset[feature_cols].fillna(0).astype(float)
     y = dataset['label']
+    sample_weight = dataset['sample_weight']
 
     print(f"Positivos: {len(positivos):,}  |  Negativos: {len(negativos):,}")
     print(f"X shape: {X.shape}  |  Features: {len(feature_cols)}")
 
-    return X, y, dataset, article_df, user_df
+    return X, y, sample_weight, dataset, article_df, user_df
 
 
 def encode_xgboost_categoricals(user_df, article_df, feature_config=None):

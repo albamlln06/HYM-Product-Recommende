@@ -49,6 +49,15 @@ N_NEGATIVOS_POR_POSITIVO = 8
 XGB_N_ESTIMATORS = 300
 XGB_MAX_DEPTH = 6
 XGB_LEARNING_RATE = 0.05
+XGB_REG_LAMBDA = 10
+XGB_SCALE_POS_WEIGHT = 5
+# Por defecto usan el valor por defecto de XGBoost (= sin efecto respecto a
+# los runs anteriores); ajústalos en XGBOOST_EXPERIMENTS para probar otros.
+XGB_REG_ALPHA = 0
+XGB_SUBSAMPLE = 1.0
+XGB_COLSAMPLE_BYTREE = 1.0
+XGB_MIN_CHILD_WEIGHT = 1
+XGB_GAMMA = 0
 
 # --- MLflow ---
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
@@ -99,6 +108,38 @@ XGBOOST_EXPERIMENTS = [
         "feature_config": None,
         "hyperparams": {
             "n_estimators": 500, "max_depth": 8, "learning_rate": 0.03,
+            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+        },
+    },
+    {
+        # Mismo modelo que xgb_all_features, pero bajando el peso de la ropa
+        # interior en el entrenamiento (sample_weight), para que el modelo no
+        # la sobre-recomiende. Ajusta los valores/categorías según lo que
+        # quieras penalizar o priorizar.
+        "run_name": "xgb_category_weights",
+        "feature_config": None,
+        "category_weights": {
+            "product_group_name": {
+                "Underwear": 0.3,
+                "Underwear/nightwear": 0.3,
+            },
+        },
+        "hyperparams": {
+            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
+            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+        },
+    },
+    {
+        # Añade regularización L1/L2 más fuerte y submuestreo de filas/columnas
+        # por árbol para reducir varianza: útil porque el negative sampling
+        # introduce negativos sintéticos que el modelo podría memorizar.
+        "run_name": "xgb_regularized",
+        "feature_config": None,
+        "hyperparams": {
+            "n_estimators": 500, "max_depth": 6, "learning_rate": 0.03,
+            "reg_lambda": 15, "reg_alpha": 1,
+            "subsample": 0.8, "colsample_bytree": 0.8,
+            "min_child_weight": 5, "gamma": 1,
             "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
         },
     },
@@ -204,23 +245,45 @@ def entrenar_modelo_cluster(
 def entrenar_modelo_xgboost(
     df_customers, df_products, df_train, eval_users, actual,
     n_estimators=300, max_depth=6, learning_rate=0.05,
+    reg_lambda=XGB_REG_LAMBDA, reg_alpha=XGB_REG_ALPHA, scale_pos_weight=XGB_SCALE_POS_WEIGHT,
+    subsample=XGB_SUBSAMPLE, colsample_bytree=XGB_COLSAMPLE_BYTREE,
+    min_child_weight=XGB_MIN_CHILD_WEIGHT, gamma=XGB_GAMMA,
     n_negativos_por_positivo=8, candidate_pool_size=120000,
     k_eval=12, random_state=42,
-    run_name="xgboost", feature_config=None, extra_params=None,
+    run_name="xgboost", feature_config=None, category_weights=None, extra_params=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
 
-    run_name      : nombre del run. Usa algo descriptivo para comparar en la UI.
-    feature_config: dict con claves article_numeric, article_categorical,
-                    user_numeric, user_categorical. None → FEATURE_CONFIG_DEFAULT.
-    extra_params  : params adicionales para MLflow (p.ej. config de datos).
+    run_name        : nombre del run. Usa algo descriptivo para comparar en la UI.
+    feature_config  : dict con claves article_numeric, article_categorical,
+                      user_numeric, user_categorical. None → FEATURE_CONFIG_DEFAULT.
+    category_weights: dict {columna_categorica: {valor: peso}} para bajar/subir
+                      el peso (sample_weight) de ciertas categorías de artículo
+                      en el entrenamiento, p.ej.
+                      {"product_group_name": {"Underwear": 0.3}}.
+                      None → todas las filas pesan igual (1.0).
+    reg_lambda      : regularización L2 de XGBoost (parámetro `reg_lambda`).
+    reg_alpha       : regularización L1 de XGBoost (parámetro `reg_alpha`).
+    scale_pos_weight: peso de la clase positiva de XGBoost (parámetro `scale_pos_weight`).
+    subsample       : fracción de filas muestreadas por árbol (parámetro `subsample`).
+    colsample_bytree: fracción de columnas muestreadas por árbol (parámetro `colsample_bytree`).
+    min_child_weight: peso mínimo de un nodo hijo para permitir un split (parámetro `min_child_weight`).
+    gamma           : reducción mínima de pérdida exigida para hacer un split (parámetro `gamma`).
+    extra_params    : params adicionales para MLflow (p.ej. config de datos).
     """
     with mlflow.start_run(run_name=run_name):
         params = {
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
+            "reg_lambda": reg_lambda,
+            "reg_alpha": reg_alpha,
+            "scale_pos_weight": scale_pos_weight,
+            "subsample": subsample,
+            "colsample_bytree": colsample_bytree,
+            "min_child_weight": min_child_weight,
+            "gamma": gamma,
             "n_negativos_por_positivo": n_negativos_por_positivo,
             "candidate_pool_size": candidate_pool_size,
             "random_state": random_state,
@@ -235,28 +298,43 @@ def entrenar_modelo_xgboost(
         mlflow.log_param("features_article_categorical", cfg["article_categorical"])
         mlflow.log_param("features_user_numeric",       cfg["user_numeric"])
         mlflow.log_param("features_user_categorical",   cfg["user_categorical"])
+        mlflow.log_param("category_weights", category_weights)
 
-        X, y, dataset, article_df, user_df = models.xgboost_preprocess(
+        X, y, sample_weight, dataset, article_df, user_df = models.xgboost_preprocess(
             df_customers, df_products, df_train,
             n_negativos_por_positivo=n_negativos_por_positivo,
             random_state=random_state,
             feature_config=feature_config,
+            category_weights=category_weights,
         )
         feature_cols = list(X.columns)
 
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=random_state, stratify=y
+        X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
+            X, y, sample_weight, test_size=0.2, random_state=random_state, stratify=y
         )
         xgb_model = XGBClassifier(
             n_estimators=n_estimators,
             max_depth=max_depth,
             learning_rate=learning_rate,
             eval_metric="logloss",
+            reg_lambda=reg_lambda,
+            reg_alpha=reg_alpha,
+            scale_pos_weight=scale_pos_weight,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            min_child_weight=min_child_weight,
+            gamma=gamma,
             random_state=random_state,
         )
-        xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+        xgb_model.fit(
+            X_train, y_train,
+            sample_weight=w_train,
+            eval_set=[(X_val, y_val)],
+            sample_weight_eval_set=[w_val],
+            verbose=False,
+        )
 
-        user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df)
+        user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df, feature_config)
         candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
         user_encoded_indexed = user_encoded.set_index("customer_id")
 
@@ -310,12 +388,20 @@ def run_xgboost_experiments(
             n_estimators=hp.get("n_estimators", XGB_N_ESTIMATORS),
             max_depth=hp.get("max_depth", XGB_MAX_DEPTH),
             learning_rate=hp.get("learning_rate", XGB_LEARNING_RATE),
+            reg_lambda=hp.get("reg_lambda", XGB_REG_LAMBDA),
+            reg_alpha=hp.get("reg_alpha", XGB_REG_ALPHA),
+            scale_pos_weight=hp.get("scale_pos_weight", XGB_SCALE_POS_WEIGHT),
+            subsample=hp.get("subsample", XGB_SUBSAMPLE),
+            colsample_bytree=hp.get("colsample_bytree", XGB_COLSAMPLE_BYTREE),
+            min_child_weight=hp.get("min_child_weight", XGB_MIN_CHILD_WEIGHT),
+            gamma=hp.get("gamma", XGB_GAMMA),
             n_negativos_por_positivo=hp.get("n_negativos_por_positivo", N_NEGATIVOS_POR_POSITIVO),
             candidate_pool_size=candidate_pool_size,
             k_eval=k_eval,
             random_state=random_state,
             run_name=exp["run_name"],
             feature_config=exp.get("feature_config"),
+            category_weights=exp.get("category_weights"),
             extra_params=extra_params,
         )
         resultados[exp["run_name"]] = resultado

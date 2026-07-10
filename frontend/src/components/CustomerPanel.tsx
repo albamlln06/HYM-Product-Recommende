@@ -59,7 +59,7 @@ export default function CustomerPanel() {
           {matches.map((c) => (
             <li key={c.customer_id}>
               <button className="customer-option" onClick={() => setSelectedId(c.customer_id)}>
-                <span className="tabular">{c.customer_id.slice(0, 16)}…</span>
+                <span className="tabular customer-id">{c.customer_id}</span>
                 <span className="muted">{c.n_compras} compras · fav: {c.seccion_favorita}</span>
               </button>
             </li>

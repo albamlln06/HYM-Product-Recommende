@@ -3,8 +3,11 @@ import type { ArticleCard } from "../api";
 export function ProductCard({ article }: { article: ArticleCard }) {
   return (
     <li className="product-card">
+      <div className="product-thumb" aria-hidden="true">
+        {article.product_type_name}
+      </div>
       <span className="product-name">{article.prod_name}</span>
-      <span className="muted">{article.product_type_name} · {article.section_name}</span>
+      <span className="muted">{article.section_name}</span>
       <span className="tabular">{article.avg_price.toFixed(4)} (precio norm.)</span>
     </li>
   );
