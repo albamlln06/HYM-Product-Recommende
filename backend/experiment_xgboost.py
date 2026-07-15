@@ -7,13 +7,14 @@ Cada elemento de COMBINACIONES puede tocar dos tipos de parámetros:
     cambian la muestra sobre la que se entrena. Recargar los datos es lento,
     así que el script los cachea y solo vuelve a cargar si cambian.
 
-  - Parámetros del MODELO (n_estimators, max_depth, learning_rate,
-    reg_lambda, reg_alpha, scale_pos_weight, subsample, colsample_bytree,
-    min_child_weight, gamma, n_negativos_por_positivo, candidate_pool_size):
-    se pasan directos a entrenar_modelo_xgboost.
+  - Parámetros del MODELO (las claves de XGB_BASE_HYPERPARAMS en train.py:
+    n_estimators, max_depth, learning_rate, reg_lambda, reg_alpha,
+    scale_pos_weight, subsample, colsample_bytree, min_child_weight, gamma,
+    n_negativos_por_positivo) y candidate_pool_size: se pasan directos a
+    entrenar_modelo_xgboost.
 
 Lo que no indiques en una combinación se rellena con el valor por defecto
-de train.py. Cada combinación queda como un run de MLflow con un nombre
+de XGB_BASE_HYPERPARAMS en train.py. Cada combinación queda como un run de MLflow con un nombre
 descriptivo (con sus hiperparámetros en el propio nombre) y todos sus
 parámetros registrados, para poder compararlos luego en `mlflow ui` sin
 tener que entrar run por run.
@@ -36,15 +37,8 @@ from train import (
     N_CUSTOMERS,
     MIN_PURCHASES,
     MAX_MONTHS_SINCE_LAST_PURCHASE,
-    N_NEGATIVOS_POR_POSITIVO,
     CANDIDATE_POOL_SIZE,
-    XGB_REG_LAMBDA,
-    XGB_REG_ALPHA,
-    XGB_SCALE_POS_WEIGHT,
-    XGB_SUBSAMPLE,
-    XGB_COLSAMPLE_BYTREE,
-    XGB_MIN_CHILD_WEIGHT,
-    XGB_GAMMA,
+    XGB_BASE_HYPERPARAMS,
     RANDOM_STATE,
     K_EVAL,
     K_CLUSTERS,
@@ -144,36 +138,19 @@ def main():
             )
         df_customers, df_products, df_train, eval_users, actual = cache_datos[clave_datos]
 
-        # Parámetros del modelo: si no se indican, se usan los de train.py
-        n_estimators = combinacion.get("n_estimators", 300)
-        max_depth = combinacion.get("max_depth", 6)
-        learning_rate = combinacion.get("learning_rate", 0.05)
-        reg_lambda = combinacion.get("reg_lambda", XGB_REG_LAMBDA)
-        reg_alpha = combinacion.get("reg_alpha", XGB_REG_ALPHA)
-        scale_pos_weight = combinacion.get("scale_pos_weight", XGB_SCALE_POS_WEIGHT)
-        subsample = combinacion.get("subsample", XGB_SUBSAMPLE)
-        colsample_bytree = combinacion.get("colsample_bytree", XGB_COLSAMPLE_BYTREE)
-        min_child_weight = combinacion.get("min_child_weight", XGB_MIN_CHILD_WEIGHT)
-        gamma = combinacion.get("gamma", XGB_GAMMA)
-        n_negativos_por_positivo = combinacion.get("n_negativos_por_positivo", N_NEGATIVOS_POR_POSITIVO)
+        # Parámetros del modelo: cada combinación parte de la misma baseline
+        # que usa train.py (XGB_BASE_HYPERPARAMS) y solo sobreescribe lo que
+        # declare explícitamente, así todas las corridas son comparables
+        # salvo por lo que cambies a propósito.
+        hp = {k: combinacion.get(k, v) for k, v in XGB_BASE_HYPERPARAMS.items()}
         candidate_pool_size = combinacion.get("candidate_pool_size", CANDIDATE_POOL_SIZE)
 
-        run_name = f"xgb_n{n_estimators}_d{max_depth}_lr{learning_rate}_cust{n_customers}_minp{min_purchases}"
+        run_name = f"xgb_n{hp['n_estimators']}_d{hp['max_depth']}_lr{hp['learning_rate']}_cust{n_customers}_minp{min_purchases}"
         print(f"\n--- Combinación {i}/{len(COMBINACIONES)}: {combinacion} ---")
 
         entrenar_modelo_xgboost(
             df_customers, df_products, df_train, eval_users, actual,
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            reg_lambda=reg_lambda,
-            reg_alpha=reg_alpha,
-            scale_pos_weight=scale_pos_weight,
-            subsample=subsample,
-            colsample_bytree=colsample_bytree,
-            min_child_weight=min_child_weight,
-            gamma=gamma,
-            n_negativos_por_positivo=n_negativos_por_positivo,
+            **hp,
             candidate_pool_size=candidate_pool_size,
             random_state=RANDOM_STATE,
             k_eval=K_EVAL,

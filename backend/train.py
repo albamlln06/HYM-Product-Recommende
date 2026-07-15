@@ -32,7 +32,7 @@ sys.path.insert(0, str(BASE_DIR / "analysis"))
 
 from utils import preprocess, models
 
-N_CUSTOMERS = 200
+N_CUSTOMERS = 500
 MIN_PURCHASES = 3
 MAX_MONTHS_SINCE_LAST_PURCHASE = 12
 #Productos que se van a recomendar (nº)
@@ -44,106 +44,52 @@ RANDOM_STATE = 42
 K_CLUSTERS = 8
 
 # --- Hiperparámetros del modelo XGBoost ---
-CANDIDATE_POOL_SIZE = 120000  # nº de artículos usados para el entrenamiento
+# None -> sin límite, se usa el catálogo completo como candidatos a recomendar.
+# Ponle un número solo si necesitas acotar el coste de cómputo al escalar
+# N_CUSTOMERS; con un número bajo, los artículos poco vendidos quedan fuera
+# del pool y el modelo nunca puede recomendarlos, tunees lo que tunees.
+CANDIDATE_POOL_SIZE = None
 N_NEGATIVOS_POR_POSITIVO = 8
 XGB_N_ESTIMATORS = 300
-XGB_MAX_DEPTH = 6
-XGB_LEARNING_RATE = 0.05
-XGB_REG_LAMBDA = 10
+XGB_MAX_DEPTH = 8
+XGB_LEARNING_RATE = 0.02
+XGB_REG_LAMBDA = 20
 XGB_SCALE_POS_WEIGHT = 5
-# Por defecto usan el valor por defecto de XGBoost (= sin efecto respecto a
-# los runs anteriores); ajústalos en XGBOOST_EXPERIMENTS para probar otros.
+# Por defecto usan el valor por defecto de XGBoost (= sin efecto); ajústalos
+# aquí para probar otros valores en la siguiente iteración.
 XGB_REG_ALPHA = 0
 XGB_SUBSAMPLE = 1.0
-XGB_COLSAMPLE_BYTREE = 1.0
-XGB_MIN_CHILD_WEIGHT = 1
-XGB_GAMMA = 0
+XGB_COLSAMPLE_BYTREE = 0.7
+XGB_MIN_CHILD_WEIGHT = 5
+XGB_GAMMA = 1
+
+# Estos son los valores que usa el ÚNICO modelo XGBoost que entrena main().
+# Edita este dict a mano en cada iteración: es la manera de controlar tú
+# mismo qué se prueba, en vez de lanzar una batería de experimentos fijos.
+XGB_BASE_HYPERPARAMS = {
+    "n_estimators": XGB_N_ESTIMATORS,
+    "max_depth": XGB_MAX_DEPTH,
+    "learning_rate": XGB_LEARNING_RATE,
+    "reg_lambda": XGB_REG_LAMBDA,
+    "reg_alpha": XGB_REG_ALPHA,
+    "scale_pos_weight": XGB_SCALE_POS_WEIGHT,
+    "subsample": XGB_SUBSAMPLE,
+    "colsample_bytree": XGB_COLSAMPLE_BYTREE,
+    "min_child_weight": XGB_MIN_CHILD_WEIGHT,
+    "gamma": XGB_GAMMA,
+    "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+}
+
+# Nombre del run en MLflow para esta iteración, qué features usar (None ->
+# FEATURE_CONFIG_DEFAULT, todas) y pesos por categoría (None -> sin cambios).
+# Cambia estos tres valores junto con XGB_BASE_HYPERPARAMS entre ejecuciones.
+XGB_RUN_NAME = "xgboost"
+XGB_FEATURE_CONFIG = None
+XGB_CATEGORY_WEIGHTS = None
 
 # --- MLflow ---
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
 MLFLOW_TRACKING_URI = f"sqlite:///{Path(__file__).resolve().parent / 'mlflow.db'}"
-
-# ------------------------------------------------------------------ #
-# Experimentos XGBoost: cada entrada = 1 run en MLflow.              #
-# Edita esta lista para añadir/quitar features o cambiar             #
-# hiperparámetros sin tocar el resto del código.                     #
-# ------------------------------------------------------------------ #
-XGBOOST_EXPERIMENTS = [
-    {
-        "run_name": "xgb_all_features",
-        "feature_config": None,   # None → usa FEATURE_CONFIG_DEFAULT (todas las features)
-        "hyperparams": {
-            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
-            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
-        },
-    },
-    {
-        "run_name": "xgb_no_categorical",
-        "feature_config": {
-            "article_numeric":    ["avg_buyer_age", "avg_price", "sales_volume", "online_ratio", "recency_days", "sex_popularity", "total_sales_volume"],
-            "article_categorical": [],
-            "user_numeric":       ["user_n_compras", "user_precio_medio", "user_precio_std", "user_online_ratio", "age"],
-            "user_categorical":   [],
-        },
-        "hyperparams": {
-            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
-            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
-        },
-    },
-    {
-        "run_name": "xgb_article_only",
-        "feature_config": {
-            "article_numeric":    ["avg_buyer_age", "avg_price", "sales_volume", "online_ratio", "recency_days", "sex_popularity", "total_sales_volume"],
-            "article_categorical": ["product_group_name", "index_group_name", "garment_group_name"],
-            "user_numeric":       [],
-            "user_categorical":   [],
-        },
-        "hyperparams": {
-            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
-            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
-        },
-    },
-    {
-        "run_name": "xgb_deeper",
-        "feature_config": None,
-        "hyperparams": {
-            "n_estimators": 500, "max_depth": 8, "learning_rate": 0.03,
-            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
-        },
-    },
-    {
-        # Mismo modelo que xgb_all_features, pero bajando el peso de la ropa
-        # interior en el entrenamiento (sample_weight), para que el modelo no
-        # la sobre-recomiende. Ajusta los valores/categorías según lo que
-        # quieras penalizar o priorizar.
-        "run_name": "xgb_category_weights",
-        "feature_config": None,
-        "category_weights": {
-            "product_group_name": {
-                "Underwear": 0.3,
-                "Underwear/nightwear": 0.3,
-            },
-        },
-        "hyperparams": {
-            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
-            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
-        },
-    },
-    {
-        # Añade regularización L1/L2 más fuerte y submuestreo de filas/columnas
-        # por árbol para reducir varianza: útil porque el negative sampling
-        # introduce negativos sintéticos que el modelo podría memorizar.
-        "run_name": "xgb_regularized",
-        "feature_config": None,
-        "hyperparams": {
-            "n_estimators": 500, "max_depth": 6, "learning_rate": 0.03,
-            "reg_lambda": 15, "reg_alpha": 1,
-            "subsample": 0.8, "colsample_bytree": 0.8,
-            "min_child_weight": 5, "gamma": 1,
-            "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
-        },
-    },
-]
 
 
 def leave_one_out_split(df_transactions):
@@ -244,11 +190,11 @@ def entrenar_modelo_cluster(
 
 def entrenar_modelo_xgboost(
     df_customers, df_products, df_train, eval_users, actual,
-    n_estimators=300, max_depth=6, learning_rate=0.05,
+    n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH, learning_rate=XGB_LEARNING_RATE,
     reg_lambda=XGB_REG_LAMBDA, reg_alpha=XGB_REG_ALPHA, scale_pos_weight=XGB_SCALE_POS_WEIGHT,
     subsample=XGB_SUBSAMPLE, colsample_bytree=XGB_COLSAMPLE_BYTREE,
     min_child_weight=XGB_MIN_CHILD_WEIGHT, gamma=XGB_GAMMA,
-    n_negativos_por_positivo=8, candidate_pool_size=120000,
+    n_negativos_por_positivo=8, candidate_pool_size=CANDIDATE_POOL_SIZE,
     k_eval=12, random_state=42,
     run_name="xgboost", feature_config=None, category_weights=None, extra_params=None,
 ):
@@ -270,6 +216,10 @@ def entrenar_modelo_xgboost(
     colsample_bytree: fracción de columnas muestreadas por árbol (parámetro `colsample_bytree`).
     min_child_weight: peso mínimo de un nodo hijo para permitir un split (parámetro `min_child_weight`).
     gamma           : reducción mínima de pérdida exigida para hacer un split (parámetro `gamma`).
+    candidate_pool_size: nº máximo de artículos candidatos a recomendar (los más
+                      vendidos primero). None → sin límite, se usa el catálogo
+                      completo (recomendado: si se acota, los artículos poco
+                      vendidos quedan fuera y el modelo nunca puede recomendarlos).
     extra_params    : params adicionales para MLflow (p.ej. config de datos).
     """
     with mlflow.start_run(run_name=run_name):
@@ -335,7 +285,9 @@ def entrenar_modelo_xgboost(
         )
 
         user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df, feature_config)
-        candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
+        candidate_pool = article_encoded.sort_values("sales_volume", ascending=False)
+        if candidate_pool_size is not None:
+            candidate_pool = candidate_pool.head(candidate_pool_size)
         user_encoded_indexed = user_encoded.set_index("customer_id")
 
         predicciones = []
@@ -363,54 +315,6 @@ def entrenar_modelo_xgboost(
         "map12": map12,
     }
     return resultado
-
-
-def run_xgboost_experiments(
-    df_customers, df_products, df_train, eval_users, actual,
-    experiments=None, candidate_pool_size=None, k_eval=None,
-    random_state=None, extra_params=None,
-):
-    """
-    Ejecuta todos los experimentos de XGBOOST_EXPERIMENTS (o la lista que pases)
-    y devuelve un dict {run_name: resultado} ordenado por MAP@12 descendente.
-    """
-    experiments       = experiments       or XGBOOST_EXPERIMENTS
-    candidate_pool_size = candidate_pool_size or CANDIDATE_POOL_SIZE
-    k_eval            = k_eval            or K_EVAL
-    random_state      = random_state      or RANDOM_STATE
-
-    resultados = {}
-    for exp in experiments:
-        hp = exp["hyperparams"]
-        print(f"\n→ Experimento: {exp['run_name']}")
-        resultado = entrenar_modelo_xgboost(
-            df_customers, df_products, df_train, eval_users, actual,
-            n_estimators=hp.get("n_estimators", XGB_N_ESTIMATORS),
-            max_depth=hp.get("max_depth", XGB_MAX_DEPTH),
-            learning_rate=hp.get("learning_rate", XGB_LEARNING_RATE),
-            reg_lambda=hp.get("reg_lambda", XGB_REG_LAMBDA),
-            reg_alpha=hp.get("reg_alpha", XGB_REG_ALPHA),
-            scale_pos_weight=hp.get("scale_pos_weight", XGB_SCALE_POS_WEIGHT),
-            subsample=hp.get("subsample", XGB_SUBSAMPLE),
-            colsample_bytree=hp.get("colsample_bytree", XGB_COLSAMPLE_BYTREE),
-            min_child_weight=hp.get("min_child_weight", XGB_MIN_CHILD_WEIGHT),
-            gamma=hp.get("gamma", XGB_GAMMA),
-            n_negativos_por_positivo=hp.get("n_negativos_por_positivo", N_NEGATIVOS_POR_POSITIVO),
-            candidate_pool_size=candidate_pool_size,
-            k_eval=k_eval,
-            random_state=random_state,
-            run_name=exp["run_name"],
-            feature_config=exp.get("feature_config"),
-            category_weights=exp.get("category_weights"),
-            extra_params=extra_params,
-        )
-        resultados[exp["run_name"]] = resultado
-
-    print("\n=== Resumen experimentos XGBoost ===")
-    for name, res in sorted(resultados.items(), key=lambda x: -x[1]["map12"]):
-        print(f"  {name:<30} MAP@12 = {res['map12']:.4f}")
-
-    return resultados
 
 
 def main():
@@ -455,13 +359,17 @@ def main():
         extra_params=extra_params_datos,
     )
 
-    print("Entrenando experimentos XGBoost...")
-    resultados_xgb = run_xgboost_experiments(
+    print("Entrenando modelo XGBoost...")
+    resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,
+        **XGB_BASE_HYPERPARAMS,
+        candidate_pool_size=CANDIDATE_POOL_SIZE,
+        k_eval=K_EVAL, random_state=RANDOM_STATE,
+        run_name=XGB_RUN_NAME,
+        feature_config=XGB_FEATURE_CONFIG,
+        category_weights=XGB_CATEGORY_WEIGHTS,
         extra_params=extra_params_datos,
     )
-    # El mejor experimento (mayor MAP@12) se usa para guardar artefactos
-    resultado_xgboost = max(resultados_xgb.values(), key=lambda r: r["map12"])
 
     # --- Métricas ---
     raw_metrics = {
