@@ -49,7 +49,8 @@ K_CLUSTERS = 8
 # N_CUSTOMERS; con un número bajo, los artículos poco vendidos quedan fuera
 # del pool y el modelo nunca puede recomendarlos, tunees lo que tunees.
 CANDIDATE_POOL_SIZE = None
-N_NEGATIVOS_POR_POSITIVO = 8
+N_NEGATIVOS_FACILES = 4
+N_NEGATIVOS_DIFICILES = 4
 XGB_N_ESTIMATORS = 300
 XGB_MAX_DEPTH = 8
 XGB_LEARNING_RATE = 0.02
@@ -77,7 +78,8 @@ XGB_BASE_HYPERPARAMS = {
     "colsample_bytree": XGB_COLSAMPLE_BYTREE,
     "min_child_weight": XGB_MIN_CHILD_WEIGHT,
     "gamma": XGB_GAMMA,
-    "n_negativos_por_positivo": N_NEGATIVOS_POR_POSITIVO,
+    "n_negativos_faciles": N_NEGATIVOS_FACILES,
+    "n_negativos_dificiles": N_NEGATIVOS_DIFICILES,
 }
 
 # Nombre del run en MLflow para esta iteración, qué features usar (None ->
@@ -194,7 +196,9 @@ def entrenar_modelo_xgboost(
     reg_lambda=XGB_REG_LAMBDA, reg_alpha=XGB_REG_ALPHA, scale_pos_weight=XGB_SCALE_POS_WEIGHT,
     subsample=XGB_SUBSAMPLE, colsample_bytree=XGB_COLSAMPLE_BYTREE,
     min_child_weight=XGB_MIN_CHILD_WEIGHT, gamma=XGB_GAMMA,
-    n_negativos_por_positivo=8, candidate_pool_size=CANDIDATE_POOL_SIZE,
+    n_negativos_faciles=4, n_negativos_dificiles=4, 
+    mapa_articulo_cluster=None, articulos_por_cluster=None,
+    candidate_pool_size=CANDIDATE_POOL_SIZE,
     k_eval=12, random_state=42,
     run_name="xgboost", feature_config=None, category_weights=None, extra_params=None,
 ):
@@ -234,7 +238,8 @@ def entrenar_modelo_xgboost(
             "colsample_bytree": colsample_bytree,
             "min_child_weight": min_child_weight,
             "gamma": gamma,
-            "n_negativos_por_positivo": n_negativos_por_positivo,
+            "n_negativos_faciles": n_negativos_faciles,
+            "n_negativos_dificiles": n_negativos_dificiles,
             "candidate_pool_size": candidate_pool_size,
             "random_state": random_state,
         }
@@ -252,11 +257,15 @@ def entrenar_modelo_xgboost(
 
         X, y, sample_weight, dataset, article_df, user_df = models.xgboost_preprocess(
             df_customers, df_products, df_train,
-            n_negativos_por_positivo=n_negativos_por_positivo,
+            n_negativos_faciles=n_negativos_faciles,
+            n_negativos_dificiles=n_negativos_dificiles,
             random_state=random_state,
             feature_config=feature_config,
             category_weights=category_weights,
+            mapa_articulo_cluster=mapa_articulo_cluster,
+            articulos_por_cluster=articulos_por_cluster
         )
+        
         feature_cols = list(X.columns)
 
         X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
@@ -358,7 +367,10 @@ def main():
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
         extra_params=extra_params_datos,
     )
-
+    print("Generando diccionarios de clústeres para Hard Negatives...")
+    df_clusters_result = resultado_cluster["df_merged"] 
+    mapa_articulo_cluster = df_clusters_result.set_index('article_id')['cluster_id'].to_dict()
+    articulos_por_cluster = df_clusters_result.groupby('cluster_id')['article_id'].apply(list).to_dict()
     print("Entrenando modelo XGBoost...")
     resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,
@@ -367,6 +379,8 @@ def main():
         k_eval=K_EVAL, random_state=RANDOM_STATE,
         run_name=XGB_RUN_NAME,
         feature_config=XGB_FEATURE_CONFIG,
+        mapa_articulo_cluster=mapa_articulo_cluster,
+        articulos_por_cluster=articulos_por_cluster
         category_weights=XGB_CATEGORY_WEIGHTS,
         extra_params=extra_params_datos,
     )

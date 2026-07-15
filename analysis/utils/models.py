@@ -117,9 +117,9 @@ def compute_article_features(df_customers, df_products, df_transactions):
         'avg_price': df['avg_price'].median(),
         'sales_volume': 0.0,
         'online_ratio': 0.0,
-        'recency_days': 999.0,
+        'recency_days': 999.0,#  Valor elevado para evitar sesgos en el modelo
         'sales_last_30d':0.0,
-        'product_age_days': 0.0  # Valor elevado para evitar sesgos en el modelo
+        'product_age_days': 0.0  
     }
     # Aplicamos la lógica columna por columna
     for col, fill_value in imputation_strategy.items():
@@ -386,50 +386,71 @@ def recommend_by_cluster_similarity(
 # ==========================================
 # MODELO XGBOOST
 # ==========================================
-
 def generar_negativos_cliente(
-    positivos_cliente,
+    positivos_cliente, # DataFrame con los artículos que compró el cliente
     cliente,
     compras_por_cliente,
     todos_los_articulos,
     prob_muestreo,
-    n_negativos_por_positivo,
     rng,
+    mapa_articulo_cluster=None,
+    articulos_por_cluster=None,
+    n_negativos_faciles=4,
+    n_negativos_dificiles=4
 ):
-    
-    comprados = compras_por_cliente.get(cliente, set())
-
-    n_necesarios = len(positivos_cliente) * n_negativos_por_positivo
-    n_generados = 0
-    intentos = 0
-    batch_size = min(n_necesarios * 3, len(todos_los_articulos))
-
+    # Usamos un set para las búsquedas rápidas (O(1))
+    comprados = set(compras_por_cliente.get(cliente, set()))
     negativos = []
 
-    while n_generados < n_necesarios and intentos < n_necesarios * 20:
-        candidatos = rng.choice(
-            todos_los_articulos,
-            size=batch_size,
-            p=prob_muestreo,
-            replace=False
-        )
-
+    # ==========================================
+    # 1. NEGATIVOS FÁCILES (Globales por popularidad)
+    # ==========================================
+    n_faciles_necesarios = len(positivos_cliente) * n_negativos_faciles
+    batch_size = min(n_faciles_necesarios * 3, len(todos_los_articulos))
+    n_generados = 0
+    intentos = 0
+    
+    while n_generados < n_faciles_necesarios and intentos < n_faciles_necesarios * 20:
+        candidatos = rng.choice(todos_los_articulos, size=batch_size, p=prob_muestreo, replace=False)
         intentos += len(candidatos)
-
+        
         for c in candidatos:
             if c not in comprados:
-                negativos.append({
-                    "customer_id": cliente,
-                    "article_id": c,
-                    "label": 0,
-                })
-
+                negativos.append({"customer_id": cliente, "article_id": c, "label": 0})
                 n_generados += 1
-
-                if n_generados >= n_necesarios:
+                comprados.add(c) # Lo añadimos para no repetir en los difíciles
+                
+                if n_generados >= n_faciles_necesarios:
                     break
 
+    # ==========================================
+    # 2. HARD NEGATIVES (Del mismo clúster)
+    # ==========================================
+    if mapa_articulo_cluster is not None and articulos_por_cluster is not None:
+        articulos_reales = positivos_cliente['article_id'].tolist()
+        
+        for articulo_comprado in articulos_reales:
+            cluster_id = mapa_articulo_cluster.get(articulo_comprado)
+            
+            # Si el artículo no tiene clúster, lo saltamos
+            if cluster_id is None or cluster_id not in articulos_por_cluster:
+                continue
+                
+            candidatos_cluster = articulos_por_cluster[cluster_id]
+            n_hard_generados = 0
+            intentos_hard = 0
+            
+            while n_hard_generados < n_negativos_dificiles and intentos_hard < 50:
+                c = rng.choice(candidatos_cluster)
+                intentos_hard += 1
+                
+                if c not in comprados:
+                    negativos.append({"customer_id": cliente, "article_id": c, "label": 0})
+                    n_hard_generados += 1
+                    comprados.add(c)
+
     return negativos
+
 
 def compute_category_sample_weights(dataset, article_df, category_weights=None, default_weight=1.0):
     """
@@ -457,7 +478,15 @@ def compute_category_sample_weights(dataset, article_df, category_weights=None, 
     return weights
 
 
-def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42, feature_config=None, category_weights=None):
+def xgboost_preprocess(df_customers, df_products, df_transactions, 
+    n_negativos_faciles=4,            
+    n_negativos_dificiles=4,          
+    random_state=42, 
+    feature_config=None, 
+    category_weights=None,
+    mapa_articulo_cluster=None,       
+    articulos_por_cluster=None        
+):
     rng = np.random.default_rng(random_state)
 
     # 1. Features de artículo y usuario
@@ -490,7 +519,10 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
                 compras_por_cliente=compras_por_cliente,
                 todos_los_articulos=todos_los_articulos,
                 prob_muestreo=prob_muestreo,
-                n_negativos_por_positivo=n_negativos_por_positivo,
+                mapa_articulo_cluster=mapa_articulo_cluster,
+                articulos_por_cluster=articulos_por_cluster,
+                n_negativos_faciles=n_negativos_faciles,
+                n_negativos_dificiles=n_negativos_dificiles
                 rng=rng,
             )
         )
