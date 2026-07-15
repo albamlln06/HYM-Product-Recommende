@@ -361,6 +361,11 @@ def main():
         df_train, eval_users, actual, k_eval=K_EVAL, extra_params=extra_params_datos,
     )
 
+    _, map_itemitem = entrenar_modelo_item_item(
+    df_train, eval_users, actual, k_eval=K_EVAL,
+    extra_params=extra_params_datos,
+)
+
     print("Entrenando modelo de clustering...")
     resultado_cluster = entrenar_modelo_cluster(
         df_customers, df_products, df_train, eval_users, actual,
@@ -432,6 +437,86 @@ def main():
 
     print(f"\nArtefactos guardados en {MODELS_DIR}")
 
+# ============================================================
+# AÑADIR A backend/train.py
+# (misma estructura que entrenar_modelo_popular / entrenar_modelo_cluster)
+# ============================================================
+
+def entrenar_modelo_item_item(
+    df_train, eval_users, actual,
+    k_eval=12,
+    top_n_similares=100,
+    time_decay_halflife_days=None,
+    run_name="itemitem_cosine",
+    extra_params=None,
+):
+    """
+    Filtrado colaborativo ítem-ítem (similitud coseno sobre la matriz de
+    compras implícita) y registro en MLflow.
+
+    time_decay_halflife_days: None -> matriz binaria clásica.
+        Un número (p.ej. 90) -> ponderación temporal de las compras.
+    """
+    with mlflow.start_run(run_name=run_name):
+        params = {
+            "k_eval": k_eval,
+            "top_n_similares": top_n_similares,
+            "time_decay_halflife_days": time_decay_halflife_days,
+        }
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
+
+        predicciones = models.predict_item_item(
+            df_train, eval_users, k=k_eval,
+            top_n_similares=top_n_similares,
+            time_decay_halflife_days=time_decay_halflife_days,
+        )
+        map12 = models.mapk(actual, predicciones, k=k_eval)
+
+        mlflow.log_metric("map12", map12)
+        print(f"[ItemItem] {run_name} -> MAP@12 = {map12:.4f}")
+
+    return predicciones, map12
+
+
+# ============================================================
+# DENTRO DE main() de train.py, tras entrenar_modelo_popular:
+# ============================================================
+#
+#     _, map_itemitem = entrenar_modelo_item_item(
+#         df_train, eval_users, actual, k_eval=K_EVAL,
+#         extra_params=extra_params_datos,
+#     )
+#     # Variante con ponderación temporal (experimento extra, opcional):
+#     _, map_itemitem_t = entrenar_modelo_item_item(
+#         df_train, eval_users, actual, k_eval=K_EVAL,
+#         time_decay_halflife_days=90,
+#         run_name="itemitem_cosine_decay90",
+#         extra_params=extra_params_datos,
+#     )
+#
+# Y en el dict de métricas final:
+#
+#     raw_metrics = {
+#         "Random": map_random,
+#         "Popular": map_popular,
+#         "ItemItem": map_itemitem,
+#         "Cluster": resultado_cluster["map12"],
+#         "XGBoost": resultado_xgboost["map12"],
+#     }
+#
+# ============================================================
+# EN backend/app.py, para que el frontend agrupe la nueva familia:
+# ============================================================
+#
+# RUN_NAME_FAMILIES = [
+#     ("baseline_random", "Random"),
+#     ("baseline_popular", "Popular"),
+#     ("itemitem", "ItemItem"),        # <- nueva línea (antes de cluster)
+#     ("cluster_kmeans", "Cluster"),
+#     ("xgb", "XGBoost"),
+# ]
 
 if __name__ == "__main__":
     main()

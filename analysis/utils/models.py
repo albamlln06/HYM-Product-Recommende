@@ -641,6 +641,159 @@ def mapk(actual, predicted, k=12):
 # ==========================================
 # MODELOS BASE
 # ==========================================
+
+# ==========================================
+# FILTRADO COLABORATIVO ÍTEM-ÍTEM
+# ==========================================
+# Imports necesarios: numpy y pandas ya están en models.py; añadir estos dos:
+import numpy as np
+import pandas as pd
+from scipy.sparse import csr_matrix
+from sklearn.preprocessing import normalize
+
+
+def build_interaction_matrix(df_train, time_decay_halflife_days=None):
+    """
+    Construye la matriz dispersa usuario x artículo a partir de las transacciones.
+
+    Cada celda vale 1 si el usuario compró el artículo (feedback implícito).
+    Si time_decay_halflife_days no es None, en lugar de 1 se usa un peso
+    temporal exp(-ln(2) * dias_desde_compra / halflife): una compra de hace
+    `halflife` días pesa 0.5, de hace 2*halflife pesa 0.25, etc. En moda,
+    la co-compra reciente es más informativa que la antigua.
+
+    Devuelve:
+        R          : csr_matrix (n_usuarios x n_articulos)
+        user_index : pd.Index para mapear customer_id -> fila
+        item_index : pd.Index para mapear article_id  -> columna
+    """
+    df = df_train[['customer_id', 'article_id']].copy()
+
+    if time_decay_halflife_days is not None:
+        max_date = df_train['t_dat'].max()
+        dias = (max_date - df_train['t_dat']).dt.days.values
+        pesos = np.exp(-np.log(2) * dias / time_decay_halflife_days)
+    else:
+        pesos = np.ones(len(df))
+
+    user_codes, user_index = pd.factorize(df['customer_id'], sort=True)
+    item_codes, item_index = pd.factorize(df['article_id'], sort=True)
+
+    # Si un usuario compró el mismo artículo varias veces, los pesos se suman
+    # (csr_matrix agrega duplicados automáticamente): la recompra refuerza la señal.
+    R = csr_matrix(
+        (pesos, (user_codes, item_codes)),
+        shape=(len(user_index), len(item_index)),
+    )
+    return R, user_index, item_index
+
+
+def fit_item_item(R, top_n_similares=100):
+    """
+    Calcula la matriz de similitud del coseno ítem-ítem.
+
+    R : csr_matrix usuario x artículo.
+    top_n_similares : para cada artículo, se conservan solo sus top_n vecinos
+        más similares y el resto se pone a 0. Esto mantiene la matriz dispersa
+        (con catálogos grandes, la matriz completa no cabe en memoria) y actúa
+        como el 'k vecinos' clásico del filtrado colaborativo por vecindad.
+
+    Devuelve S : csr_matrix (n_articulos x n_articulos) con la similitud coseno.
+    """
+    # Normalizamos las columnas (vectores de artículo) a norma L2 = 1;
+    # así R_norm.T @ R_norm es directamente la similitud del coseno.
+    R_norm = normalize(R.tocsc(), norm='l2', axis=0)
+    S = (R_norm.T @ R_norm).tocsr()
+
+    # Quitamos la diagonal (similitud de un artículo consigo mismo = 1):
+    # no queremos que un artículo se recomiende "por parecerse a sí mismo".
+    S.setdiag(0)
+    S.eliminate_zeros()
+
+    # Poda: nos quedamos con los top_n vecinos por fila
+    if top_n_similares is not None:
+        S = _keep_top_n_per_row(S, top_n_similares)
+
+    return S
+
+
+def _keep_top_n_per_row(S, n):
+    """Conserva los n valores más altos de cada fila de una csr_matrix."""
+    S = S.tocsr()
+    data, indices, indptr = [], [], [0]
+    for i in range(S.shape[0]):
+        row_start, row_end = S.indptr[i], S.indptr[i + 1]
+        row_data = S.data[row_start:row_end]
+        row_idx = S.indices[row_start:row_end]
+        if len(row_data) > n:
+            top = np.argpartition(row_data, -n)[-n:]
+            row_data, row_idx = row_data[top], row_idx[top]
+        data.append(row_data)
+        indices.append(row_idx)
+        indptr.append(indptr[-1] + len(row_data))
+    return csr_matrix(
+        (np.concatenate(data), np.concatenate(indices), np.array(indptr)),
+        shape=S.shape,
+    )
+
+
+def predict_item_item(
+    df_train,
+    users_list,
+    k=12,
+    top_n_similares=100,
+    time_decay_halflife_days=None,
+):
+    """
+    Filtrado colaborativo ítem-ítem sobre feedback implícito (compras).
+
+    Para cada usuario: puntuación de cada artículo candidato = suma de
+    similitudes coseno entre el candidato y los artículos que el usuario
+    compró. Se excluyen los ya comprados y se devuelve el top-k.
+
+    Mismo contrato que predict_random / predict_popular:
+        (df_train, users_list, k) -> lista de listas de article_id.
+
+    time_decay_halflife_days : None -> matriz binaria clásica.
+        Un número (p.ej. 90) -> las compras recientes pesan más, tanto al
+        calcular similitudes como al puntuar candidatos.
+    """
+    R, user_index, item_index = build_interaction_matrix(
+        df_train, time_decay_halflife_days=time_decay_halflife_days
+    )
+    S = fit_item_item(R, top_n_similares=top_n_similares)
+
+    # Puntuaciones de todos los artículos para todos los usuarios de una vez:
+    # scores[u] = r_u @ S  (suma de similitudes con lo comprado por u)
+    user_pos = {u: i for i, u in enumerate(user_index)}
+    item_ids = item_index.to_numpy()
+
+    predictions = []
+    for u in users_list:
+        if u not in user_pos:
+            predictions.append([])          # usuario sin historial en train
+            continue
+
+        r_u = R[user_pos[u]]                # vector disperso de compras del usuario
+        scores = np.asarray((r_u @ S).todense()).ravel()
+
+        # Excluimos lo ya comprado
+        comprados = r_u.indices
+        scores[comprados] = -np.inf
+
+        n_validos = int(np.sum(np.isfinite(scores) & (scores > 0)))
+        if n_validos == 0:
+            predictions.append([])
+            continue
+
+        top = min(k, n_validos)
+        cand = np.argpartition(scores, -top)[-top:]
+        cand = cand[np.argsort(scores[cand])[::-1]]
+        predictions.append(item_ids[cand].tolist())
+
+    return predictions
+
+    
 def predict_random(df_train, users_list, k=12, seed=42):
     """
     Genera k predicciones aleatorias para una lista de usuarios.
@@ -691,3 +844,4 @@ def predict_cluster(df_transactions, df_customers, df_products, customer_ids, K=
         predictions.append(recs['article_id'].tolist() if not recs.empty else [])
 
     return predictions, df_merged, summary, kmeans_model, X_final
+

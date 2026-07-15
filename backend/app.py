@@ -33,6 +33,8 @@ RUN_NAME_FAMILIES = [
     ("baseline_popular", "Popular"),
     ("cluster_kmeans", "Cluster"),
     ("xgb", "XGBoost"),
+    ("itemitem", "ItemItem"),
+
 ]
 
 
