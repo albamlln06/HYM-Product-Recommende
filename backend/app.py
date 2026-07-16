@@ -33,10 +33,10 @@ mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB_PATH}")
 RUN_NAME_FAMILIES = [
     ("baseline_random", "Random"),
     ("baseline_popular", "Popular"),
+    ("cluster_xgb", "ClusterXGBoost"),
     ("cluster_kmeans", "Cluster"),
     ("xgb", "XGBoost"),
     ("itemitem", "ItemItem"),
-
 ]
 
 

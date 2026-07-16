@@ -361,6 +361,64 @@ def entrenar_modelo_xgboost(
     return resultado
 
 
+def entrenar_modelo_cluster_xgboost(
+    df_train, eval_users, actual,
+    df_merged, candidate_pool, user_encoded, xgb_model, feature_cols,
+    k_eval=12,
+    run_name="cluster_xgb_hybrid",
+    extra_params=None,
+):
+    """
+    Híbrido cluster + XGBoost, reutiliza los modelos ya entrenados por
+    entrenar_modelo_cluster y entrenar_modelo_xgboost (no reentrena nada).
+
+    Para cada usuario: primero se acota el pool de candidatos a los
+    clústeres de los que ya ha comprado (misma lógica que
+    recommend_by_cluster_similarity) y, dentro de ese pool reducido, se
+    rankea con el modelo XGBoost ya entrenado (mismo candidate_pool que usa
+    entrenar_modelo_xgboost, solo que aquí se filtra por clúster antes de
+    puntuar).
+    """
+    with mlflow.start_run(run_name=run_name):
+        params = {"k_eval": k_eval}
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
+
+        user_encoded_indexed = user_encoded.set_index("customer_id")
+        candidate_pool_indexed = candidate_pool.set_index("article_id")
+        cluster_por_articulo = df_merged.set_index("article_id")["cluster"]
+
+        predicciones = []
+        for u in eval_users:
+            if u not in user_encoded_indexed.index:
+                predicciones.append([])
+                continue
+
+            bought = df_train.loc[df_train["customer_id"] == u, "article_id"].unique()
+            clusters_bought = cluster_por_articulo.reindex(bought).dropna().unique()
+            if len(clusters_bought) == 0:
+                predicciones.append([])
+                continue
+
+            candidatos_cluster = cluster_por_articulo[cluster_por_articulo.isin(clusters_bought)].index
+            candidate_ids = candidate_pool_indexed.index.intersection(candidatos_cluster).difference(bought)
+            if len(candidate_ids) == 0:
+                predicciones.append([])
+                continue
+            candidate_df = candidate_pool_indexed.loc[candidate_ids].reset_index()
+
+            user_row = user_encoded_indexed.loc[u]
+            recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_df, feature_cols, top_n=k_eval)
+            predicciones.append(recs["article_id"].tolist())
+
+        map12 = models.mapk(actual, predicciones, k=k_eval)
+        mlflow.log_metric("map12", map12)
+        print(f"[Cluster+XGB] {run_name} -> MAP@12 = {map12:.4f}")
+
+    return predicciones, map12
+
+
 def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
@@ -425,6 +483,18 @@ def main():
         extra_params=extra_params_datos,
     )
 
+    print("Entrenando modelo híbrido Cluster + XGBoost...")
+    _, map_cluster_xgb = entrenar_modelo_cluster_xgboost(
+        df_train, eval_users, actual,
+        df_merged=resultado_cluster["df_merged"],
+        candidate_pool=resultado_xgboost["candidate_pool"],
+        user_encoded=resultado_xgboost["user_encoded"],
+        xgb_model=resultado_xgboost["xgb_model"],
+        feature_cols=resultado_xgboost["feature_cols"],
+        k_eval=K_EVAL,
+        extra_params=extra_params_datos,
+    )
+
     # --- Métricas ---
     raw_metrics = {
         "Random": map_random,
@@ -432,6 +502,7 @@ def main():
         "ItemItem": map_itemitem,
         "Cluster": resultado_cluster["map12"],
         "XGBoost": resultado_xgboost["map12"],
+        "ClusterXGBoost": map_cluster_xgb,
     }
     print("MAP@12:")
     for name, score in sorted(raw_metrics.items(), key=lambda x: -x[1]):

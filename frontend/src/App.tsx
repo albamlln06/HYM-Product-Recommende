@@ -14,7 +14,13 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Panel de recomendación de productos</h1>
+        <h1 className="brand">
+          <span className="brand-mark" aria-hidden="true">S</span>
+          <span className="brand-word">
+            STUDIO<span className="brand-dot">.</span>
+          </span>
+        </h1>
+        <p className="brand-tagline">Panel de recomendación de productos</p>
         <nav className="tabs">
           <button
             className={tab === "home" ? "tab active" : "tab"}
