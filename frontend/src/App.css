@@ -369,3 +369,26 @@ h3 {
   max-width: 720px;
   text-align: left;
 }
+
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 320px;
+  margin-top: 16px;
+}
+
+.product-action {
+  margin-top: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--series-1);
+  color: #fff;
+  cursor: pointer;
+}
+
+.product-action:hover {
+  opacity: 0.9;
+}

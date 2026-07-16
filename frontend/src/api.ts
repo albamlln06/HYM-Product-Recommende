@@ -54,13 +54,38 @@ export interface MlflowRunsResponse {
   runs: MlflowRun[];
 }
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`);
+export interface Profile {
+  customer_id: string;
+  display_name: string;
+  age: number | null;
+  club_member_status: string | null;
+  historial: ArticleCard[];
+}
+
+export interface ProfileRecommendations {
+  customer_id: string;
+  personalized: boolean;
+  historial: ArticleCard[];
+  recomendaciones_cluster?: ArticleCard[];
+  recomendaciones_xgboost?: ArticleCard[];
+  recomendaciones_populares?: ArticleCard[];
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail ?? `Error ${res.status} al llamar a ${path}`);
   }
   return res.json();
+}
+
+function postJson<T>(path: string, body?: unknown): Promise<T> {
+  return fetchJson(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
 }
 
 export function getMetrics(): Promise<MetricsResponse> {
@@ -79,4 +104,31 @@ export function getCustomerRecommendations(customerId: string): Promise<Customer
 
 export function getMlflowRuns(): Promise<MlflowRunsResponse> {
   return fetchJson("/api/mlflow/runs");
+}
+
+export function searchArticles(query: string, limit = 30): Promise<ArticleCard[]> {
+  const params = new URLSearchParams();
+  if (query) params.set("query", query);
+  params.set("limit", String(limit));
+  return fetchJson(`/api/articles?${params.toString()}`);
+}
+
+export function createProfile(payload: {
+  display_name: string;
+  age?: number | null;
+  club_member_status?: string | null;
+}): Promise<Profile> {
+  return postJson("/api/profile", payload);
+}
+
+export function addPurchase(customerId: string, articleId: number): Promise<Profile> {
+  return postJson(`/api/profile/${encodeURIComponent(customerId)}/purchases`, { article_id: articleId });
+}
+
+export function resetProfile(customerId: string): Promise<Profile> {
+  return postJson(`/api/profile/${encodeURIComponent(customerId)}/reset`);
+}
+
+export function getProfileRecommendations(customerId: string): Promise<ProfileRecommendations> {
+  return fetchJson(`/api/profile/${encodeURIComponent(customerId)}/recommendations`);
 }

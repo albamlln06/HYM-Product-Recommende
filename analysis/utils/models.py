@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -346,6 +348,54 @@ def get_customer_profile(customer_id, df_transactions, X_df):
 
     return X_df.loc[bought_valid].mean(axis=0).to_frame().T
 
+# ==========================================
+# FILTRADO ESTACIONAL (recomendaciones en vivo)
+# ==========================================
+# Solo se filtran las categorías inequívocamente ligadas a una estación
+# (abrigos, botas, bañadores...). El resto del catálogo (camisetas,
+# pantalones, vestidos, accesorios...) es "todo el año" y nunca se excluye.
+PRODUCT_TYPES_INVIERNO = {
+    "Coat", "Jacket", "Outdoor Waistcoat", "Outdoor trousers", "Outdoor overall",
+    "Gloves", "Scarf", "Beanie", "Hat/beanie", "Boots", "Bootie", "Long John",
+    "Sleeping sack",
+}
+PRODUCT_TYPES_VERANO = {
+    "Swimwear bottom", "Bikini top", "Swimsuit", "Swimwear set", "Swimwear top",
+    "Sandals", "Flip flop", "Heeled sandals", "Sarong",
+}
+
+
+def get_current_season(reference_date=None):
+    """
+    Estación real (hemisferio norte) a partir de una fecha. None -> ahora mismo.
+
+    Devuelve 'invierno' / 'verano' / None. None cubre primavera y otoño: son
+    estaciones de transición, no tiene sentido excluir ni abrigos ni ropa de
+    baño en esos meses.
+    """
+    month = (reference_date or datetime.now()).month
+    if month in (12, 1, 2):
+        return "invierno"
+    if month in (6, 7, 8):
+        return "verano"
+    return None
+
+
+def filter_articles_by_season(df_articles, season, type_col="product_type_name"):
+    """
+    Descarta del pool de candidatos los artículos fuera de estación.
+
+    season='verano'   -> descarta PRODUCT_TYPES_INVIERNO (abrigos, botas...).
+    season='invierno' -> descarta PRODUCT_TYPES_VERANO (bañadores, sandalias...).
+    season=None        -> no filtra nada (primavera/otoño).
+    """
+    if season is None or type_col not in df_articles.columns:
+        return df_articles
+
+    off_season_types = PRODUCT_TYPES_INVIERNO if season == "verano" else PRODUCT_TYPES_VERANO
+    return df_articles[~df_articles[type_col].isin(off_season_types)]
+
+
 def recommend_by_cluster_similarity(
     customer_id,
     df_transactions,
@@ -522,7 +572,7 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
                 mapa_articulo_cluster=mapa_articulo_cluster,
                 articulos_por_cluster=articulos_por_cluster,
                 n_negativos_faciles=n_negativos_faciles,
-                n_negativos_dificiles=n_negativos_dificiles
+                n_negativos_dificiles=n_negativos_dificiles,
                 rng=rng,
             )
         )

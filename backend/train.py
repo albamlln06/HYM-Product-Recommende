@@ -50,23 +50,20 @@ K_CLUSTERS = 8
 # del pool y el modelo nunca puede recomendarlos, tunees lo que tunees.
 CANDIDATE_POOL_SIZE = None
 N_NEGATIVOS_FACILES = 4
-N_NEGATIVOS_DIFICILES = 4
+N_NEGATIVOS_DIFICILES = 6
 XGB_N_ESTIMATORS = 300
-XGB_MAX_DEPTH = 8
+XGB_MAX_DEPTH = 7
 XGB_LEARNING_RATE = 0.02
-XGB_REG_LAMBDA = 20
+XGB_REG_LAMBDA = 15
 XGB_SCALE_POS_WEIGHT = 5
 # Por defecto usan el valor por defecto de XGBoost (= sin efecto); ajústalos
 # aquí para probar otros valores en la siguiente iteración.
 XGB_REG_ALPHA = 0
 XGB_SUBSAMPLE = 1.0
 XGB_COLSAMPLE_BYTREE = 0.7
-XGB_MIN_CHILD_WEIGHT = 5
+XGB_MIN_CHILD_WEIGHT = 7
 XGB_GAMMA = 1
 
-# Estos son los valores que usa el ÚNICO modelo XGBoost que entrena main().
-# Edita este dict a mano en cada iteración: es la manera de controlar tú
-# mismo qué se prueba, en vez de lanzar una batería de experimentos fijos.
 XGB_BASE_HYPERPARAMS = {
     "n_estimators": XGB_N_ESTIMATORS,
     "max_depth": XGB_MAX_DEPTH,
@@ -142,6 +139,44 @@ def entrenar_modelo_popular(df_train, eval_users, actual, k_eval=12, run_name="b
 
         mlflow.log_metric("map12", map12)
         print(f"[Popular] MAP@12 = {map12:.4f}")
+
+    return predicciones, map12
+
+
+def entrenar_modelo_item_item(
+    df_train, eval_users, actual,
+    k_eval=12,
+    top_n_similares=100,
+    time_decay_halflife_days=None,
+    run_name="itemitem_cosine",
+    extra_params=None,
+):
+    """
+    Filtrado colaborativo ítem-ítem (similitud coseno sobre la matriz de
+    compras implícita) y registro en MLflow.
+
+    time_decay_halflife_days: None -> matriz binaria clásica.
+        Un número (p.ej. 90) -> ponderación temporal de las compras.
+    """
+    with mlflow.start_run(run_name=run_name):
+        params = {
+            "k_eval": k_eval,
+            "top_n_similares": top_n_similares,
+            "time_decay_halflife_days": time_decay_halflife_days,
+        }
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
+
+        predicciones = models.predict_item_item(
+            df_train, eval_users, k=k_eval,
+            top_n_similares=top_n_similares,
+            time_decay_halflife_days=time_decay_halflife_days,
+        )
+        map12 = models.mapk(actual, predicciones, k=k_eval)
+
+        mlflow.log_metric("map12", map12)
+        print(f"[ItemItem] {run_name} -> MAP@12 = {map12:.4f}")
 
     return predicciones, map12
 
@@ -362,9 +397,9 @@ def main():
     )
 
     _, map_itemitem = entrenar_modelo_item_item(
-    df_train, eval_users, actual, k_eval=K_EVAL,
-    extra_params=extra_params_datos,
-)
+        df_train, eval_users, actual, k_eval=K_EVAL,
+        extra_params=extra_params_datos,
+    )
 
     print("Entrenando modelo de clustering...")
     resultado_cluster = entrenar_modelo_cluster(
@@ -374,8 +409,8 @@ def main():
     )
     print("Generando diccionarios de clústeres para Hard Negatives...")
     df_clusters_result = resultado_cluster["df_merged"] 
-    mapa_articulo_cluster = df_clusters_result.set_index('article_id')['cluster_id'].to_dict()
-    articulos_por_cluster = df_clusters_result.groupby('cluster_id')['article_id'].apply(list).to_dict()
+    mapa_articulo_cluster = df_clusters_result.set_index('article_id')['cluster'].to_dict()
+    articulos_por_cluster = df_clusters_result.groupby('cluster')['article_id'].apply(list).to_dict()
     print("Entrenando modelo XGBoost...")
     resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,
@@ -385,7 +420,7 @@ def main():
         run_name=XGB_RUN_NAME,
         feature_config=XGB_FEATURE_CONFIG,
         mapa_articulo_cluster=mapa_articulo_cluster,
-        articulos_por_cluster=articulos_por_cluster
+        articulos_por_cluster=articulos_por_cluster,
         category_weights=XGB_CATEGORY_WEIGHTS,
         extra_params=extra_params_datos,
     )
@@ -394,6 +429,7 @@ def main():
     raw_metrics = {
         "Random": map_random,
         "Popular": map_popular,
+        "ItemItem": map_itemitem,
         "Cluster": resultado_cluster["map12"],
         "XGBoost": resultado_xgboost["map12"],
     }
@@ -437,86 +473,6 @@ def main():
 
     print(f"\nArtefactos guardados en {MODELS_DIR}")
 
-# ============================================================
-# AÑADIR A backend/train.py
-# (misma estructura que entrenar_modelo_popular / entrenar_modelo_cluster)
-# ============================================================
-
-def entrenar_modelo_item_item(
-    df_train, eval_users, actual,
-    k_eval=12,
-    top_n_similares=100,
-    time_decay_halflife_days=None,
-    run_name="itemitem_cosine",
-    extra_params=None,
-):
-    """
-    Filtrado colaborativo ítem-ítem (similitud coseno sobre la matriz de
-    compras implícita) y registro en MLflow.
-
-    time_decay_halflife_days: None -> matriz binaria clásica.
-        Un número (p.ej. 90) -> ponderación temporal de las compras.
-    """
-    with mlflow.start_run(run_name=run_name):
-        params = {
-            "k_eval": k_eval,
-            "top_n_similares": top_n_similares,
-            "time_decay_halflife_days": time_decay_halflife_days,
-        }
-        if extra_params:
-            params.update(extra_params)
-        mlflow.log_params(params)
-
-        predicciones = models.predict_item_item(
-            df_train, eval_users, k=k_eval,
-            top_n_similares=top_n_similares,
-            time_decay_halflife_days=time_decay_halflife_days,
-        )
-        map12 = models.mapk(actual, predicciones, k=k_eval)
-
-        mlflow.log_metric("map12", map12)
-        print(f"[ItemItem] {run_name} -> MAP@12 = {map12:.4f}")
-
-    return predicciones, map12
-
-
-# ============================================================
-# DENTRO DE main() de train.py, tras entrenar_modelo_popular:
-# ============================================================
-#
-#     _, map_itemitem = entrenar_modelo_item_item(
-#         df_train, eval_users, actual, k_eval=K_EVAL,
-#         extra_params=extra_params_datos,
-#     )
-#     # Variante con ponderación temporal (experimento extra, opcional):
-#     _, map_itemitem_t = entrenar_modelo_item_item(
-#         df_train, eval_users, actual, k_eval=K_EVAL,
-#         time_decay_halflife_days=90,
-#         run_name="itemitem_cosine_decay90",
-#         extra_params=extra_params_datos,
-#     )
-#
-# Y en el dict de métricas final:
-#
-#     raw_metrics = {
-#         "Random": map_random,
-#         "Popular": map_popular,
-#         "ItemItem": map_itemitem,
-#         "Cluster": resultado_cluster["map12"],
-#         "XGBoost": resultado_xgboost["map12"],
-#     }
-#
-# ============================================================
-# EN backend/app.py, para que el frontend agrupe la nueva familia:
-# ============================================================
-#
-# RUN_NAME_FAMILIES = [
-#     ("baseline_random", "Random"),
-#     ("baseline_popular", "Popular"),
-#     ("itemitem", "ItemItem"),        # <- nueva línea (antes de cluster)
-#     ("cluster_kmeans", "Cluster"),
-#     ("xgb", "XGBoost"),
-# ]
 
 if __name__ == "__main__":
     main()

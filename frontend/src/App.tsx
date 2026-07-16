@@ -4,8 +4,9 @@ import Home from "./components/Home";
 import MetricsPanel from "./components/MetricsPanel";
 import CustomerPanel from "./components/CustomerPanel";
 import EvolutionPanel from "./components/EvolutionPanel";
+import ProfilePanel from "./components/ProfilePanel";
 
-type Tab = "home" | "customer" | "metrics" | "evolution";
+type Tab = "home" | "customer" | "metrics" | "evolution" | "profile";
 
 function App() {
   const [tab, setTab] = useState<Tab>("home");
@@ -39,6 +40,12 @@ function App() {
           >
             Evolución de modelos
           </button>
+          <button
+            className={tab === "profile" ? "tab active" : "tab"}
+            onClick={() => setTab("profile")}
+          >
+            Mi perfil
+          </button>
         </nav>
       </header>
 
@@ -47,6 +54,7 @@ function App() {
         {tab === "customer" && <CustomerPanel />}
         {tab === "metrics" && <MetricsPanel />}
         {tab === "evolution" && <EvolutionPanel />}
+        {tab === "profile" && <ProfilePanel />}
       </main>
     </div>
   );

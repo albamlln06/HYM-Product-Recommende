@@ -1,6 +1,11 @@
 import type { ArticleCard } from "../api";
 
-export function ProductCard({ article }: { article: ArticleCard }) {
+interface ProductActionProps {
+  actionLabel?: string;
+  onAction?: (article: ArticleCard) => void;
+}
+
+export function ProductCard({ article, actionLabel, onAction }: { article: ArticleCard } & ProductActionProps) {
   return (
     <li className="product-card">
       <div className="product-thumb" aria-hidden="true">
@@ -9,11 +14,21 @@ export function ProductCard({ article }: { article: ArticleCard }) {
       <span className="product-name">{article.prod_name}</span>
       <span className="muted">{article.section_name}</span>
       <span className="tabular">{article.avg_price.toFixed(4)} (precio norm.)</span>
+      {onAction && (
+        <button type="button" className="product-action" onClick={() => onAction(article)}>
+          {actionLabel ?? "Añadir"}
+        </button>
+      )}
     </li>
   );
 }
 
-export function ProductList({ title, articles }: { title: string; articles: ArticleCard[] }) {
+export function ProductList({
+  title,
+  articles,
+  actionLabel,
+  onAction,
+}: { title: string; articles: ArticleCard[] } & ProductActionProps) {
   return (
     <div className="product-column">
       <h3>{title}</h3>
@@ -22,7 +37,7 @@ export function ProductList({ title, articles }: { title: string; articles: Arti
       ) : (
         <ul className="product-list">
           {articles.map((a) => (
-            <ProductCard key={a.article_id} article={a} />
+            <ProductCard key={a.article_id} article={a} actionLabel={actionLabel} onAction={onAction} />
           ))}
         </ul>
       )}
