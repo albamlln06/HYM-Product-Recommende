@@ -492,7 +492,7 @@ def encode_xgboost_categoricals(user_df, article_df):
 
 def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols, top_n=12):
     """
-    Rankea un pool fijo de artículos candidatos para un usuario con un XGBClassifier ya entrenado.
+    Rankea un pool fijo de artículos candidatos para un usuario con un XGBRanker ya entrenado.
 
     user_features : dict o Series con las features de UN usuario, ya codificadas
                     (salida de encode_xgboost_categoricals para ese customer_id).
@@ -509,7 +509,7 @@ def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols,
     combined = pd.concat([user_block, article_block], axis=1)
     X_infer = combined.reindex(columns=feature_cols, fill_value=0).fillna(0).astype(float)
 
-    scores = model.predict_proba(X_infer)[:, 1]
+    scores = model.predict(X_infer)
 
     ranked = candidate_df.assign(score=scores).sort_values('score', ascending=False)
     return ranked.head(top_n)[['article_id', 'score']].reset_index(drop=True)
@@ -541,13 +541,15 @@ def mapk(actual, predicted, k=12):
 # ==========================================
 # MODELOS BASE
 # ==========================================
-def predict_random(df_train, users_list, k=12, seed=42):
+def predict_random(df_products, users_list, k=12, seed=42):
     """
-    Genera k predicciones aleatorias para una lista de usuarios.
+    Genera k predicciones aleatorias para una lista de usuarios, muestreando
+    sobre el catálogo completo (df_products) para competir en el mismo
+    universo de candidatos que el resto de modelos (Cluster, XGBoost).
     """
     np.random.seed(seed)
-    todos_los_articulos = df_train['article_id'].unique()
-    
+    todos_los_articulos = df_products['article_id'].unique()
+
     # Generamos la matriz de predicciones
     predictions = [np.random.choice(todos_los_articulos, k, replace=False).tolist() for _ in range(len(users_list))]
     return predictions

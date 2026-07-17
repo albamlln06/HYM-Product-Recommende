@@ -83,7 +83,7 @@ def entrenar_baselines_para_combinacion(
     }
 
     entrenar_modelo_random(
-        df_train, eval_users, actual, k_eval=K_EVAL, seed=RANDOM_STATE,
+        df_products, eval_users, actual, k_eval=K_EVAL, seed=RANDOM_STATE,
         run_name=f"baseline_random_{config_id}", extra_params=extra_params,
     )
     entrenar_modelo_popular(
