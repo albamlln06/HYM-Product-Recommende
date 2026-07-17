@@ -343,8 +343,8 @@ def get_customer_profile(customer_id, df_transactions, X_df):
 
     if len(bought_valid) == 0:
         return pd.DataFrame()
-    
-    print("Customer profile: ", X_df.loc[bought_valid].mean(axis=0).to_frame().T)
+    #Ensucia la conosola
+    #print("Customer profile: ", X_df.loc[bought_valid].mean(axis=0).to_frame().T)
 
     return X_df.loc[bought_valid].mean(axis=0).to_frame().T
 
@@ -584,23 +584,23 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
     #     peso de la ropa interior). None -> todas las filas pesan 1.0.
     dataset['sample_weight'] = compute_category_sample_weights(dataset, article_df, category_weights)
 
-    # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
-    user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df, feature_config)
-
-    # 5. Join final: dataset × features de usuario × features de artículo
+   
+    # 4. Join final: dataset × features de usuario × features de artículo
     dataset = (
         dataset
-        .merge(user_encoded,       on='customer_id', how='left')
-        .merge(article_encoded, on='article_id',  how='left')
+        .merge(user_df,       on='customer_id', how='left')
+        .merge(article_df, on='article_id',  how='left')
     )
-    #imputamos los nulos
+    dataset = compute_cross_features(dataset)
+    #5Imputamos los nulos
     dataset = imputar_nulos_tfm(dataset)
-    #Convertimos los textos a categorías para ahorrar memoria RAM
-    # 6. Separar X e y
-    cols_no_feature = ['customer_id', 'article_id', 'label', 'sample_weight']
+    #6 Convertimos los textos a categorías para ahorrar memoria RAM
+    dataset = auto_optimize_categories(dataset,exclude_cols=['customer_id','article_id'])
+    # 7. Separar X e y
+    cols_no_feature = ['customer_id', 'article_id', 'label', 'sample_weight','prod_name', 'detail_desc']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]
 
-    X = dataset[feature_cols].fillna(0).astype(float)
+    X = dataset[feature_cols].copy()
     y = dataset['label']
     sample_weight = dataset['sample_weight']
 

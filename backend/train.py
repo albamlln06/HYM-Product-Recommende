@@ -23,9 +23,13 @@ import mlflow.sklearn
 import mlflow.xgboost
 import numpy as np
 import pandas as pd
+pd.set_option("mode.string_storage", "python") # (Opcional para optimizar strings)
+pd.set_option("compute.use_numexpr", True)
 import time
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
@@ -50,19 +54,20 @@ K_CLUSTERS = 8
 # N_CUSTOMERS; con un número bajo, los artículos poco vendidos quedan fuera
 # del pool y el modelo nunca puede recomendarlos, tunees lo que tunees.
 CANDIDATE_POOL_SIZE = None
-N_NEGATIVOS_FACILES = 4
-N_NEGATIVOS_DIFICILES = 6
-XGB_N_ESTIMATORS = 300
-XGB_MAX_DEPTH = 7
-XGB_LEARNING_RATE = 0.02
+N_NEGATIVOS_FACILES = 3
+N_NEGATIVOS_DIFICILES = 3
+XGB_N_ESTIMATORS = 150
+XGB_MAX_DEPTH = 5
+XGB_LEARNING_RATE = 0.05
 XGB_REG_LAMBDA = 15
-XGB_SCALE_POS_WEIGHT = 5
+XGB_SCALE_POS_WEIGHT = 1
+
 # Por defecto usan el valor por defecto de XGBoost (= sin efecto); ajústalos
 # aquí para probar otros valores en la siguiente iteración.
 XGB_REG_ALPHA = 0
 XGB_SUBSAMPLE = 1.0
 XGB_COLSAMPLE_BYTREE = 0.7
-XGB_MIN_CHILD_WEIGHT = 7
+XGB_MIN_CHILD_WEIGHT = 1
 XGB_GAMMA = 1
 
 XGB_BASE_HYPERPARAMS = {
@@ -88,9 +93,25 @@ XGB_FEATURE_CONFIG = None
 XGB_CATEGORY_WEIGHTS = None
 
 # --- MLflow ---
-MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
+MLFLOW_EXPERIMENT_NAME = "hym-recomendator-jorge"
 MLFLOW_TRACKING_URI = f"sqlite:///{Path(__file__).resolve().parent / 'mlflow.db'}"
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
+# --- EL TRUCO PARA FORZAR TU RUTA LOCAL ---
+client = mlflow.tracking.MlflowClient()
+exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME)
+
+if exp is None:
+    # Creamos una carpeta 'mlartifacts' dentro de tu proyecto actual de forma dinámica
+    ruta_local_artefactos = Path(__file__).resolve().parent / "mlartifacts"
+    # Convertimos la ruta a formato URI (file:///C:/Users/jorge/...)
+    artifact_uri = ruta_local_artefactos.as_uri()
+    
+    # Creamos el experimento forzando tu ruta local
+    mlflow.create_experiment(MLFLOW_EXPERIMENT_NAME, artifact_location=artifact_uri)
+
+# Nos conectamos a tu experimento
+mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
 def leave_one_out_split(df_transactions):
     last_purchase_idx = df_transactions.groupby("customer_id")["t_dat"].idxmax()
@@ -319,14 +340,17 @@ def entrenar_modelo_xgboost(
             colsample_bytree=colsample_bytree,
             min_child_weight=min_child_weight,
             gamma=gamma,
+            tree_method="hist",
+            n_jobs=-1,
             random_state=random_state,
+            early_stopping_rounds=10,
         )
         xgb_model.fit(
             X_train, y_train,
-            sample_weight=w_train,
+            #sample_weight=w_train,
             eval_set=[(X_val, y_val)],
-            sample_weight_eval_set=[w_val],
-            verbose=False,
+            #sample_weight_eval_set=[w_val],
+            verbose=True,
         )
 
         user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df, feature_config)
