@@ -44,11 +44,11 @@ RANDOM_STATE = 42
 K_CLUSTERS = 10
 
 # --- Hiperparámetros del modelo XGBoost ---
-CANDIDATE_POOL_SIZE = 120000  # nº de artículos usados para el entrenamiento
+CANDIDATE_POOL_SIZE = 50000  # nº de artículos usados para el entrenamiento
 N_NEGATIVOS_POR_POSITIVO = 8
 XGB_N_ESTIMATORS = 500
 XGB_MAX_DEPTH = 6
-XGB_LEARNING_RATE = 0.05
+XGB_LEARNING_RATE = 0.06
 
 # --- MLflow ---
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
