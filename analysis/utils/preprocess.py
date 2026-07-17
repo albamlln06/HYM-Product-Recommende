@@ -47,10 +47,17 @@ def load_complete_dataset_filtered_number_customers(num_customers, random_state=
     # 1. Cargamos los datos usando la función base
     df_customers, df_products, df_transactions = load_dataset()
 
-    # 2. Extraemos y muestreamos clientes
-    unique_customer_ids = df_transactions['customer_id'].unique()
-    sampled_customer_ids = pd.Series(unique_customer_ids).sample(n=num_customers, random_state=random_state)
+    # 1. SAMPLEO INTELIGENTE DE CLIENTES
+    # ==========================================
+    # Contamos cuántas transacciones tiene cada cliente en total
+    purchases_client = df_transactions.groupby("customer_id").size()
 
+    # Sampleo ponderado: más probabilidad a los que más compran, pero manteniendo aleatoriedad
+    sampled_customer_ids = purchases_client.sample(
+        n=num_customers, 
+        random_state=random_state, 
+        weights=purchases_client.values
+    ).index.tolist()
     # 3. Filtramos
     df_customers_filtered = df_customers[df_customers['customer_id'].isin(sampled_customer_ids)]
     df_transactions_filtered = df_transactions[df_transactions['customer_id'].isin(sampled_customer_ids)]
