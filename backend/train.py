@@ -23,6 +23,7 @@ import mlflow.sklearn
 import mlflow.xgboost
 import numpy as np
 import pandas as pd
+import time
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
@@ -235,7 +236,7 @@ def entrenar_modelo_xgboost(
     mapa_articulo_cluster=None, articulos_por_cluster=None,
     candidate_pool_size=CANDIDATE_POOL_SIZE,
     k_eval=12, random_state=42,
-    run_name="xgboost", feature_config=None, category_weights=None, extra_params=None,
+    run_name="xgboost(tras mejora filtrando clientes)", feature_config=None, category_weights=None, extra_params=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
@@ -420,10 +421,12 @@ def entrenar_modelo_cluster_xgboost(
 
 
 def main():
+    t_total_0 = time.time()
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
     print(f"Cargando muestra de {N_CUSTOMERS} clientes...")
+    t_load_0 = time.time()
     df_customers, df_products, df_transactions = preprocess.load_complete_dataset_filtered_number_customers(
         N_CUSTOMERS, random_state=RANDOM_STATE
     )
@@ -431,6 +434,7 @@ def main():
         df_transactions, min_purchases=MIN_PURCHASES, max_months_since_last_purchase=MAX_MONTHS_SINCE_LAST_PURCHASE
     )
     print(f"Transacciones tras filtro de actividad: {len(df_transactions):,}")
+    print(f"Tiempo cargando: {time.time() - t_load_0:.2f}s")
 
     df_train, df_test, eval_users, actual = leave_one_out_split(df_transactions)
     print(f"Usuarios de evaluación: {len(eval_users):,}  |  train: {len(df_train):,}  |  test: {len(df_test):,}")
@@ -460,16 +464,19 @@ def main():
     )
 
     print("Entrenando modelo de clustering...")
+    t_cluster_0 = time.time()
     resultado_cluster = entrenar_modelo_cluster(
         df_customers, df_products, df_train, eval_users, actual,
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
         extra_params=extra_params_datos,
     )
+    print(f"Tiempo entrenado modelo de clustering: {time.time() - t_cluster_0:.2f}s")
     print("Generando diccionarios de clústeres para Hard Negatives...")
     df_clusters_result = resultado_cluster["df_merged"] 
     mapa_articulo_cluster = df_clusters_result.set_index('article_id')['cluster'].to_dict()
     articulos_por_cluster = df_clusters_result.groupby('cluster')['article_id'].apply(list).to_dict()
     print("Entrenando modelo XGBoost...")
+    t_xgboost_0 = time.time()
     resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,
         **XGB_BASE_HYPERPARAMS,
@@ -482,8 +489,9 @@ def main():
         category_weights=XGB_CATEGORY_WEIGHTS,
         extra_params=extra_params_datos,
     )
-
+    print(f"Tiempo entrenado modelo XGBoost: {time.time() - t_xgboost_0:.2f}s")
     print("Entrenando modelo híbrido Cluster + XGBoost...")
+    t_cluster_xgb_0 = time.time()
     _, map_cluster_xgb = entrenar_modelo_cluster_xgboost(
         df_train, eval_users, actual,
         df_merged=resultado_cluster["df_merged"],
@@ -494,7 +502,8 @@ def main():
         k_eval=K_EVAL,
         extra_params=extra_params_datos,
     )
-
+    print(f"Tiempo entrenado modelo híbrido Cluster + XGBoost: {time.time() - t_cluster_xgb_0:.2f}s")
+    t_eval_0 = time.time() #tiempo de evaluación
     # --- Métricas ---
     raw_metrics = {
         "Random": map_random,
@@ -543,6 +552,8 @@ def main():
     )
 
     print(f"\nArtefactos guardados en {MODELS_DIR}")
+    print(f"Tiempo de evaluación: {time.time() - t_eval_0:.2f}s")
+    print(f"Tiempo total: {time.time() - t_total_0:.2f}s")
 
 
 if __name__ == "__main__":
