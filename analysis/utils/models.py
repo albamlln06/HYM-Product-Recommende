@@ -1,5 +1,3 @@
-from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -49,32 +47,6 @@ NUMERIC_FEATURES_XGBOOST = [
     'total_sales_volume',
 ]
 
-USER_NUMERIC_FEATURES = [
-    'user_n_compras',
-    'user_precio_medio',
-    'user_precio_std',
-    'user_online_ratio',
-    'age',
-]
-
-USER_CATEGORICAL_FEATURES = ['club_member_status']
-
-# Config por defecto: todas las features disponibles.
-# Pasa una copia modificada a xgboost_preprocess / entrenar_modelo_xgboost
-# para probar distintas combinaciones sin tocar estas listas.
-FEATURE_CONFIG_DEFAULT = {
-    "article_numeric":    NUMERIC_FEATURES_XGBOOST,
-    "article_categorical": CATEGORICAL_FEATURES_XGBOOST,
-    "user_numeric":       USER_NUMERIC_FEATURES,
-    "user_categorical":   USER_CATEGORICAL_FEATURES,
-}
-
-# Pesos por categoría para el entrenamiento de XGBoost (sample_weight).
-# 1.0 = sin cambios. Un valor < 1.0 hace que esas filas influyan menos en la
-# función de pérdida (p.ej. bajar la importancia de la ropa interior en el
-# ranking); > 1.0 las prioriza. None / dict vacío -> todas las filas pesan igual.
-CATEGORY_WEIGHTS_DEFAULT = None
-
 def compute_article_features(df_customers, df_products, df_transactions):
     """
     Calcula features agregadas por article_id a partir de transacciones.
@@ -119,9 +91,9 @@ def compute_article_features(df_customers, df_products, df_transactions):
         'avg_price': df['avg_price'].median(),
         'sales_volume': 0.0,
         'online_ratio': 0.0,
-        'recency_days': 999.0,#  Valor elevado para evitar sesgos en el modelo
+        'recency_days': 999.0,
         'sales_last_30d':0.0,
-        'product_age_days': 0.0  
+        'product_age_days': 0.0  # Valor elevado para evitar sesgos en el modelo
     }
     # Aplicamos la lógica columna por columna
     for col, fill_value in imputation_strategy.items():
@@ -348,54 +320,6 @@ def get_customer_profile(customer_id, df_transactions, X_df):
 
     return X_df.loc[bought_valid].mean(axis=0).to_frame().T
 
-# ==========================================
-# FILTRADO ESTACIONAL (recomendaciones en vivo)
-# ==========================================
-# Solo se filtran las categorías inequívocamente ligadas a una estación
-# (abrigos, botas, bañadores...). El resto del catálogo (camisetas,
-# pantalones, vestidos, accesorios...) es "todo el año" y nunca se excluye.
-PRODUCT_TYPES_INVIERNO = {
-    "Coat", "Jacket", "Outdoor Waistcoat", "Outdoor trousers", "Outdoor overall",
-    "Gloves", "Scarf", "Beanie", "Hat/beanie", "Boots", "Bootie", "Long John",
-    "Sleeping sack",
-}
-PRODUCT_TYPES_VERANO = {
-    "Swimwear bottom", "Bikini top", "Swimsuit", "Swimwear set", "Swimwear top",
-    "Sandals", "Flip flop", "Heeled sandals", "Sarong",
-}
-
-
-def get_current_season(reference_date=None):
-    """
-    Estación real (hemisferio norte) a partir de una fecha. None -> ahora mismo.
-
-    Devuelve 'invierno' / 'verano' / None. None cubre primavera y otoño: son
-    estaciones de transición, no tiene sentido excluir ni abrigos ni ropa de
-    baño en esos meses.
-    """
-    month = (reference_date or datetime.now()).month
-    if month in (12, 1, 2):
-        return "invierno"
-    if month in (6, 7, 8):
-        return "verano"
-    return None
-
-
-def filter_articles_by_season(df_articles, season, type_col="product_type_name"):
-    """
-    Descarta del pool de candidatos los artículos fuera de estación.
-
-    season='verano'   -> descarta PRODUCT_TYPES_INVIERNO (abrigos, botas...).
-    season='invierno' -> descarta PRODUCT_TYPES_VERANO (bañadores, sandalias...).
-    season=None        -> no filtra nada (primavera/otoño).
-    """
-    if season is None or type_col not in df_articles.columns:
-        return df_articles
-
-    off_season_types = PRODUCT_TYPES_INVIERNO if season == "verano" else PRODUCT_TYPES_VERANO
-    return df_articles[~df_articles[type_col].isin(off_season_types)]
-
-
 def recommend_by_cluster_similarity(
     customer_id,
     df_transactions,
@@ -436,107 +360,52 @@ def recommend_by_cluster_similarity(
 # ==========================================
 # MODELO XGBOOST
 # ==========================================
+
 def generar_negativos_cliente(
-    positivos_cliente, # DataFrame con los artículos que compró el cliente
+    positivos_cliente,
     cliente,
     compras_por_cliente,
     todos_los_articulos,
     prob_muestreo,
+    n_negativos_por_positivo,
     rng,
-    mapa_articulo_cluster=None,
-    articulos_por_cluster=None,
-    n_negativos_faciles=4,
-    n_negativos_dificiles=4
 ):
-    # Usamos un set para las búsquedas rápidas (O(1))
-    comprados = set(compras_por_cliente.get(cliente, set()))
-    negativos = []
+    
+    comprados = compras_por_cliente.get(cliente, set())
 
-    # ==========================================
-    # 1. NEGATIVOS FÁCILES (Globales por popularidad)
-    # ==========================================
-    n_faciles_necesarios = len(positivos_cliente) * n_negativos_faciles
-    batch_size = min(n_faciles_necesarios * 3, len(todos_los_articulos))
+    n_necesarios = len(positivos_cliente) * n_negativos_por_positivo
     n_generados = 0
     intentos = 0
-    
-    while n_generados < n_faciles_necesarios and intentos < n_faciles_necesarios * 20:
-        candidatos = rng.choice(todos_los_articulos, size=batch_size, p=prob_muestreo, replace=False)
+    batch_size = min(n_necesarios * 3, len(todos_los_articulos))
+
+    negativos = []
+
+    while n_generados < n_necesarios and intentos < n_necesarios * 20:
+        candidatos = rng.choice(
+            todos_los_articulos,
+            size=batch_size,
+            p=prob_muestreo,
+            replace=False
+        )
+
         intentos += len(candidatos)
-        
+
         for c in candidatos:
             if c not in comprados:
-                negativos.append({"customer_id": cliente, "article_id": c, "label": 0})
-                n_generados += 1
-                comprados.add(c) # Lo añadimos para no repetir en los difíciles
-                
-                if n_generados >= n_faciles_necesarios:
-                    break
+                negativos.append({
+                    "customer_id": cliente,
+                    "article_id": c,
+                    "label": 0,
+                })
 
-    # ==========================================
-    # 2. HARD NEGATIVES (Del mismo clúster)
-    # ==========================================
-    if mapa_articulo_cluster is not None and articulos_por_cluster is not None:
-        articulos_reales = positivos_cliente['article_id'].tolist()
-        
-        for articulo_comprado in articulos_reales:
-            cluster_id = mapa_articulo_cluster.get(articulo_comprado)
-            
-            # Si el artículo no tiene clúster, lo saltamos
-            if cluster_id is None or cluster_id not in articulos_por_cluster:
-                continue
-                
-            candidatos_cluster = articulos_por_cluster[cluster_id]
-            n_hard_generados = 0
-            intentos_hard = 0
-            
-            while n_hard_generados < n_negativos_dificiles and intentos_hard < 50:
-                c = rng.choice(candidatos_cluster)
-                intentos_hard += 1
-                
-                if c not in comprados:
-                    negativos.append({"customer_id": cliente, "article_id": c, "label": 0})
-                    n_hard_generados += 1
-                    comprados.add(c)
+                n_generados += 1
+
+                if n_generados >= n_necesarios:
+                    break
 
     return negativos
 
-
-def compute_category_sample_weights(dataset, article_df, category_weights=None, default_weight=1.0):
-    """
-    Calcula el sample_weight de cada fila del dataset de entrenamiento de
-    XGBoost según la categoría del artículo (positivo o negativo muestreado).
-
-    category_weights: dict {columna_categorica: {valor: peso}}, p.ej.
-        {"product_group_name": {"Underwear": 0.3, "Underwear/nightwear": 0.3}}
-    hace que las filas de ropa interior pesen un 30% en la función de pérdida.
-    Los valores no listados (o columnas ausentes en article_df) usan
-    default_weight. Si se configura más de una columna, los pesos se
-    multiplican entre sí.
-    """
-    weights = pd.Series(default_weight, index=dataset.index, dtype=float)
-    if not category_weights:
-        return weights
-
-    article_categories = article_df.set_index('article_id')
-    for category_col, value_weights in category_weights.items():
-        if category_col not in article_categories.columns:
-            continue
-        col_values = dataset['article_id'].map(article_categories[category_col])
-        weights *= col_values.map(value_weights).fillna(default_weight)
-
-    return weights
-
-
-def xgboost_preprocess(df_customers, df_products, df_transactions, 
-    n_negativos_faciles=4,            
-    n_negativos_dificiles=4,          
-    random_state=42, 
-    feature_config=None, 
-    category_weights=None,
-    mapa_articulo_cluster=None,       
-    articulos_por_cluster=None        
-):
+def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
     rng = np.random.default_rng(random_state)
 
     # 1. Features de artículo y usuario
@@ -569,10 +438,7 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
                 compras_por_cliente=compras_por_cliente,
                 todos_los_articulos=todos_los_articulos,
                 prob_muestreo=prob_muestreo,
-                mapa_articulo_cluster=mapa_articulo_cluster,
-                articulos_por_cluster=articulos_por_cluster,
-                n_negativos_faciles=n_negativos_faciles,
-                n_negativos_dificiles=n_negativos_dificiles,
+                n_negativos_por_positivo=n_negativos_por_positivo,
                 rng=rng,
             )
         )
@@ -580,12 +446,8 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
 
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
 
-    # 3b. Peso de cada fila según la categoría del artículo (p.ej. bajar el
-    #     peso de la ropa interior). None -> todas las filas pesan 1.0.
-    dataset['sample_weight'] = compute_category_sample_weights(dataset, article_df, category_weights)
-
     # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
-    user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df, feature_config)
+    user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df)
 
     # 5. Join final: dataset × features de usuario × features de artículo
     dataset = (
@@ -597,46 +459,34 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
     dataset = imputar_nulos_tfm(dataset)
     #Convertimos los textos a categorías para ahorrar memoria RAM
     # 6. Separar X e y
-    cols_no_feature = ['customer_id', 'article_id', 'label', 'sample_weight']
+    cols_no_feature = ['customer_id', 'article_id', 'label']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]
 
     X = dataset[feature_cols].fillna(0).astype(float)
     y = dataset['label']
-    sample_weight = dataset['sample_weight']
 
     print(f"Positivos: {len(positivos):,}  |  Negativos: {len(negativos):,}")
     print(f"X shape: {X.shape}  |  Features: {len(feature_cols)}")
 
-    return X, y, sample_weight, dataset, article_df, user_df
+    return X, y, dataset, article_df, user_df
 
 
-def encode_xgboost_categoricals(user_df, article_df, feature_config=None):
+def encode_xgboost_categoricals(user_df, article_df):
     """
     Aplica el one-hot encoding de usuario y artículo usado por XGBoost.
 
     Se comparte entre xgboost_preprocess (entrenamiento) y el servido en vivo
     de recomendaciones, para que ambos generen exactamente las mismas columnas.
-    Acepta feature_config para controlar qué features se incluyen.
     """
-    if feature_config is None:
-        feature_config = FEATURE_CONFIG_DEFAULT
+    cat_user = [c for c in ['club_member_status', 'user_favorite_section'] if c in user_df.columns]
+    user_encoded = pd.get_dummies(user_df, columns=cat_user, dummy_na=False) if cat_user else user_df.copy()
 
-    # --- Usuario ---
-    user_num = [c for c in feature_config["user_numeric"] if c in user_df.columns]
-    user_cat = [c for c in feature_config["user_categorical"] if c in user_df.columns]
-    user_sub = user_df[["customer_id"] + user_num + user_cat].copy()
-    user_encoded = (
-        pd.get_dummies(user_sub, columns=user_cat, dummy_na=False) if user_cat else user_sub
+    available_cat = [c for c in CATEGORICAL_FEATURES_XGBOOST if c in article_df.columns]
+    article_encoded = pd.get_dummies(
+        article_df[['article_id'] + available_cat + NUMERIC_FEATURES_XGBOOST],
+        columns=available_cat,
+        dummy_na=False,
     )
-
-    # --- Artículo ---
-    art_num = [c for c in feature_config["article_numeric"] if c in article_df.columns]
-    art_cat = [c for c in feature_config["article_categorical"] if c in article_df.columns]
-    article_sub = article_df[["article_id"] + art_num + art_cat].copy()
-    article_encoded = (
-        pd.get_dummies(article_sub, columns=art_cat, dummy_na=False) if art_cat else article_sub
-    )
-
     return user_encoded, article_encoded
 
 
@@ -691,159 +541,6 @@ def mapk(actual, predicted, k=12):
 # ==========================================
 # MODELOS BASE
 # ==========================================
-
-# ==========================================
-# FILTRADO COLABORATIVO ÍTEM-ÍTEM
-# ==========================================
-# Imports necesarios: numpy y pandas ya están en models.py; añadir estos dos:
-import numpy as np
-import pandas as pd
-from scipy.sparse import csr_matrix
-from sklearn.preprocessing import normalize
-
-
-def build_interaction_matrix(df_train, time_decay_halflife_days=None):
-    """
-    Construye la matriz dispersa usuario x artículo a partir de las transacciones.
-
-    Cada celda vale 1 si el usuario compró el artículo (feedback implícito).
-    Si time_decay_halflife_days no es None, en lugar de 1 se usa un peso
-    temporal exp(-ln(2) * dias_desde_compra / halflife): una compra de hace
-    `halflife` días pesa 0.5, de hace 2*halflife pesa 0.25, etc. En moda,
-    la co-compra reciente es más informativa que la antigua.
-
-    Devuelve:
-        R          : csr_matrix (n_usuarios x n_articulos)
-        user_index : pd.Index para mapear customer_id -> fila
-        item_index : pd.Index para mapear article_id  -> columna
-    """
-    df = df_train[['customer_id', 'article_id']].copy()
-
-    if time_decay_halflife_days is not None:
-        max_date = df_train['t_dat'].max()
-        dias = (max_date - df_train['t_dat']).dt.days.values
-        pesos = np.exp(-np.log(2) * dias / time_decay_halflife_days)
-    else:
-        pesos = np.ones(len(df))
-
-    user_codes, user_index = pd.factorize(df['customer_id'], sort=True)
-    item_codes, item_index = pd.factorize(df['article_id'], sort=True)
-
-    # Si un usuario compró el mismo artículo varias veces, los pesos se suman
-    # (csr_matrix agrega duplicados automáticamente): la recompra refuerza la señal.
-    R = csr_matrix(
-        (pesos, (user_codes, item_codes)),
-        shape=(len(user_index), len(item_index)),
-    )
-    return R, user_index, item_index
-
-
-def fit_item_item(R, top_n_similares=100):
-    """
-    Calcula la matriz de similitud del coseno ítem-ítem.
-
-    R : csr_matrix usuario x artículo.
-    top_n_similares : para cada artículo, se conservan solo sus top_n vecinos
-        más similares y el resto se pone a 0. Esto mantiene la matriz dispersa
-        (con catálogos grandes, la matriz completa no cabe en memoria) y actúa
-        como el 'k vecinos' clásico del filtrado colaborativo por vecindad.
-
-    Devuelve S : csr_matrix (n_articulos x n_articulos) con la similitud coseno.
-    """
-    # Normalizamos las columnas (vectores de artículo) a norma L2 = 1;
-    # así R_norm.T @ R_norm es directamente la similitud del coseno.
-    R_norm = normalize(R.tocsc(), norm='l2', axis=0)
-    S = (R_norm.T @ R_norm).tocsr()
-
-    # Quitamos la diagonal (similitud de un artículo consigo mismo = 1):
-    # no queremos que un artículo se recomiende "por parecerse a sí mismo".
-    S.setdiag(0)
-    S.eliminate_zeros()
-
-    # Poda: nos quedamos con los top_n vecinos por fila
-    if top_n_similares is not None:
-        S = _keep_top_n_per_row(S, top_n_similares)
-
-    return S
-
-
-def _keep_top_n_per_row(S, n):
-    """Conserva los n valores más altos de cada fila de una csr_matrix."""
-    S = S.tocsr()
-    data, indices, indptr = [], [], [0]
-    for i in range(S.shape[0]):
-        row_start, row_end = S.indptr[i], S.indptr[i + 1]
-        row_data = S.data[row_start:row_end]
-        row_idx = S.indices[row_start:row_end]
-        if len(row_data) > n:
-            top = np.argpartition(row_data, -n)[-n:]
-            row_data, row_idx = row_data[top], row_idx[top]
-        data.append(row_data)
-        indices.append(row_idx)
-        indptr.append(indptr[-1] + len(row_data))
-    return csr_matrix(
-        (np.concatenate(data), np.concatenate(indices), np.array(indptr)),
-        shape=S.shape,
-    )
-
-
-def predict_item_item(
-    df_train,
-    users_list,
-    k=12,
-    top_n_similares=100,
-    time_decay_halflife_days=None,
-):
-    """
-    Filtrado colaborativo ítem-ítem sobre feedback implícito (compras).
-
-    Para cada usuario: puntuación de cada artículo candidato = suma de
-    similitudes coseno entre el candidato y los artículos que el usuario
-    compró. Se excluyen los ya comprados y se devuelve el top-k.
-
-    Mismo contrato que predict_random / predict_popular:
-        (df_train, users_list, k) -> lista de listas de article_id.
-
-    time_decay_halflife_days : None -> matriz binaria clásica.
-        Un número (p.ej. 90) -> las compras recientes pesan más, tanto al
-        calcular similitudes como al puntuar candidatos.
-    """
-    R, user_index, item_index = build_interaction_matrix(
-        df_train, time_decay_halflife_days=time_decay_halflife_days
-    )
-    S = fit_item_item(R, top_n_similares=top_n_similares)
-
-    # Puntuaciones de todos los artículos para todos los usuarios de una vez:
-    # scores[u] = r_u @ S  (suma de similitudes con lo comprado por u)
-    user_pos = {u: i for i, u in enumerate(user_index)}
-    item_ids = item_index.to_numpy()
-
-    predictions = []
-    for u in users_list:
-        if u not in user_pos:
-            predictions.append([])          # usuario sin historial en train
-            continue
-
-        r_u = R[user_pos[u]]                # vector disperso de compras del usuario
-        scores = np.asarray((r_u @ S).todense()).ravel()
-
-        # Excluimos lo ya comprado
-        comprados = r_u.indices
-        scores[comprados] = -np.inf
-
-        n_validos = int(np.sum(np.isfinite(scores) & (scores > 0)))
-        if n_validos == 0:
-            predictions.append([])
-            continue
-
-        top = min(k, n_validos)
-        cand = np.argpartition(scores, -top)[-top:]
-        cand = cand[np.argsort(scores[cand])[::-1]]
-        predictions.append(item_ids[cand].tolist())
-
-    return predictions
-
-    
 def predict_random(df_train, users_list, k=12, seed=42):
     """
     Genera k predicciones aleatorias para una lista de usuarios.
@@ -894,4 +591,3 @@ def predict_cluster(df_transactions, df_customers, df_products, customer_ids, K=
         predictions.append(recs['article_id'].tolist() if not recs.empty else [])
 
     return predictions, df_merged, summary, kmeans_model, X_final
-

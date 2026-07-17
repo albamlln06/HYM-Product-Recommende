@@ -23,7 +23,6 @@ import mlflow.sklearn
 import mlflow.xgboost
 import numpy as np
 import pandas as pd
-import time
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
@@ -42,50 +41,14 @@ K_EVAL = 12
 RANDOM_STATE = 42
 
 # --- Hiperparámetros del modelo de clustering ---
-K_CLUSTERS = 8
+K_CLUSTERS = 10
 
 # --- Hiperparámetros del modelo XGBoost ---
-# None -> sin límite, se usa el catálogo completo como candidatos a recomendar.
-# Ponle un número solo si necesitas acotar el coste de cómputo al escalar
-# N_CUSTOMERS; con un número bajo, los artículos poco vendidos quedan fuera
-# del pool y el modelo nunca puede recomendarlos, tunees lo que tunees.
-CANDIDATE_POOL_SIZE = None
-N_NEGATIVOS_FACILES = 4
-N_NEGATIVOS_DIFICILES = 6
+CANDIDATE_POOL_SIZE = 120000  # nº de artículos usados para el entrenamiento
+N_NEGATIVOS_POR_POSITIVO = 8
 XGB_N_ESTIMATORS = 300
-XGB_MAX_DEPTH = 7
-XGB_LEARNING_RATE = 0.02
-XGB_REG_LAMBDA = 15
-XGB_SCALE_POS_WEIGHT = 5
-# Por defecto usan el valor por defecto de XGBoost (= sin efecto); ajústalos
-# aquí para probar otros valores en la siguiente iteración.
-XGB_REG_ALPHA = 0
-XGB_SUBSAMPLE = 1.0
-XGB_COLSAMPLE_BYTREE = 0.7
-XGB_MIN_CHILD_WEIGHT = 7
-XGB_GAMMA = 1
-
-XGB_BASE_HYPERPARAMS = {
-    "n_estimators": XGB_N_ESTIMATORS,
-    "max_depth": XGB_MAX_DEPTH,
-    "learning_rate": XGB_LEARNING_RATE,
-    "reg_lambda": XGB_REG_LAMBDA,
-    "reg_alpha": XGB_REG_ALPHA,
-    "scale_pos_weight": XGB_SCALE_POS_WEIGHT,
-    "subsample": XGB_SUBSAMPLE,
-    "colsample_bytree": XGB_COLSAMPLE_BYTREE,
-    "min_child_weight": XGB_MIN_CHILD_WEIGHT,
-    "gamma": XGB_GAMMA,
-    "n_negativos_faciles": N_NEGATIVOS_FACILES,
-    "n_negativos_dificiles": N_NEGATIVOS_DIFICILES,
-}
-
-# Nombre del run en MLflow para esta iteración, qué features usar (None ->
-# FEATURE_CONFIG_DEFAULT, todas) y pesos por categoría (None -> sin cambios).
-# Cambia estos tres valores junto con XGB_BASE_HYPERPARAMS entre ejecuciones.
-XGB_RUN_NAME = "xgboost"
-XGB_FEATURE_CONFIG = None
-XGB_CATEGORY_WEIGHTS = None
+XGB_MAX_DEPTH = 4
+XGB_LEARNING_RATE = 0.05
 
 # --- MLflow ---
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
@@ -144,44 +107,6 @@ def entrenar_modelo_popular(df_train, eval_users, actual, k_eval=12, run_name="b
     return predicciones, map12
 
 
-def entrenar_modelo_item_item(
-    df_train, eval_users, actual,
-    k_eval=12,
-    top_n_similares=100,
-    time_decay_halflife_days=None,
-    run_name="itemitem_cosine",
-    extra_params=None,
-):
-    """
-    Filtrado colaborativo ítem-ítem (similitud coseno sobre la matriz de
-    compras implícita) y registro en MLflow.
-
-    time_decay_halflife_days: None -> matriz binaria clásica.
-        Un número (p.ej. 90) -> ponderación temporal de las compras.
-    """
-    with mlflow.start_run(run_name=run_name):
-        params = {
-            "k_eval": k_eval,
-            "top_n_similares": top_n_similares,
-            "time_decay_halflife_days": time_decay_halflife_days,
-        }
-        if extra_params:
-            params.update(extra_params)
-        mlflow.log_params(params)
-
-        predicciones = models.predict_item_item(
-            df_train, eval_users, k=k_eval,
-            top_n_similares=top_n_similares,
-            time_decay_halflife_days=time_decay_halflife_days,
-        )
-        map12 = models.mapk(actual, predicciones, k=k_eval)
-
-        mlflow.log_metric("map12", map12)
-        print(f"[ItemItem] {run_name} -> MAP@12 = {map12:.4f}")
-
-    return predicciones, map12
-
-
 def entrenar_modelo_cluster(
     df_customers, df_products, df_train, eval_users, actual,
     k_clusters=8, k_eval=12, random_state=42,
@@ -228,54 +153,27 @@ def entrenar_modelo_cluster(
 
 def entrenar_modelo_xgboost(
     df_customers, df_products, df_train, eval_users, actual,
-    n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH, learning_rate=XGB_LEARNING_RATE,
-    reg_lambda=XGB_REG_LAMBDA, reg_alpha=XGB_REG_ALPHA, scale_pos_weight=XGB_SCALE_POS_WEIGHT,
-    subsample=XGB_SUBSAMPLE, colsample_bytree=XGB_COLSAMPLE_BYTREE,
-    min_child_weight=XGB_MIN_CHILD_WEIGHT, gamma=XGB_GAMMA,
-    n_negativos_faciles=4, n_negativos_dificiles=4, 
-    mapa_articulo_cluster=None, articulos_por_cluster=None,
-    candidate_pool_size=CANDIDATE_POOL_SIZE,
+    n_estimators=300, max_depth=6, learning_rate=0.05,
+    n_negativos_por_positivo=8, candidate_pool_size=120000,
     k_eval=12, random_state=42,
-    run_name="xgboost(tras mejora filtrando clientes)", feature_config=None, category_weights=None, extra_params=None,
+    run_name="xgboost", extra_params=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
 
-    run_name        : nombre del run. Usa algo descriptivo para comparar en la UI.
-    feature_config  : dict con claves article_numeric, article_categorical,
-                      user_numeric, user_categorical. None → FEATURE_CONFIG_DEFAULT.
-    category_weights: dict {columna_categorica: {valor: peso}} para bajar/subir
-                      el peso (sample_weight) de ciertas categorías de artículo
-                      en el entrenamiento, p.ej.
-                      {"product_group_name": {"Underwear": 0.3}}.
-                      None → todas las filas pesan igual (1.0).
-    reg_lambda      : regularización L2 de XGBoost (parámetro `reg_lambda`).
-    reg_alpha       : regularización L1 de XGBoost (parámetro `reg_alpha`).
-    scale_pos_weight: peso de la clase positiva de XGBoost (parámetro `scale_pos_weight`).
-    subsample       : fracción de filas muestreadas por árbol (parámetro `subsample`).
-    colsample_bytree: fracción de columnas muestreadas por árbol (parámetro `colsample_bytree`).
-    min_child_weight: peso mínimo de un nodo hijo para permitir un split (parámetro `min_child_weight`).
-    gamma           : reducción mínima de pérdida exigida para hacer un split (parámetro `gamma`).
-    candidate_pool_size: nº máximo de artículos candidatos a recomendar (los más
-                      vendidos primero). None → sin límite, se usa el catálogo
-                      completo (recomendado: si se acota, los artículos poco
-                      vendidos quedan fuera y el modelo nunca puede recomendarlos).
-    extra_params    : params adicionales para MLflow (p.ej. config de datos).
+    run_name    : nombre del run en MLflow. Al hacer pruebas conviene poner
+                  algo descriptivo (p.ej. "xgb_n300_d6_lr0.05") para
+                  distinguir cada combinación de un vistazo en la UI.
+    extra_params: dict opcional con parámetros que NO afectan a esta función
+                  pero que quieres dejar registrados en MLflow para saber
+                  con qué datos se entrenó (p.ej. nº de clientes usados).
     """
     with mlflow.start_run(run_name=run_name):
         params = {
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
-            "reg_lambda": reg_lambda,
-            "reg_alpha": reg_alpha,
-            "scale_pos_weight": scale_pos_weight,
-            "subsample": subsample,
-            "colsample_bytree": colsample_bytree,
-            "min_child_weight": min_child_weight,
-            "gamma": gamma,
-            "n_negativos_faciles": n_negativos_faciles,
-            "n_negativos_dificiles": n_negativos_dificiles,
+            "n_negativos_por_positivo": n_negativos_por_positivo,
             "candidate_pool_size": candidate_pool_size,
             "random_state": random_state,
         }
@@ -283,56 +181,26 @@ def entrenar_modelo_xgboost(
             params.update(extra_params)
         mlflow.log_params(params)
 
-        # Loguear qué features se usan en este experimento
-        cfg = feature_config or models.FEATURE_CONFIG_DEFAULT
-        mlflow.log_param("features_article_numeric",    cfg["article_numeric"])
-        mlflow.log_param("features_article_categorical", cfg["article_categorical"])
-        mlflow.log_param("features_user_numeric",       cfg["user_numeric"])
-        mlflow.log_param("features_user_categorical",   cfg["user_categorical"])
-        mlflow.log_param("category_weights", category_weights)
-
-        X, y, sample_weight, dataset, article_df, user_df = models.xgboost_preprocess(
+        X, y, dataset, article_df, user_df = models.xgboost_preprocess(
             df_customers, df_products, df_train,
-            n_negativos_faciles=n_negativos_faciles,
-            n_negativos_dificiles=n_negativos_dificiles,
-            random_state=random_state,
-            feature_config=feature_config,
-            category_weights=category_weights,
-            mapa_articulo_cluster=mapa_articulo_cluster,
-            articulos_por_cluster=articulos_por_cluster
+            n_negativos_por_positivo=n_negativos_por_positivo, random_state=random_state,
         )
-        
         feature_cols = list(X.columns)
 
-        X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
-            X, y, sample_weight, test_size=0.2, random_state=random_state, stratify=y
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=random_state, stratify=y
         )
         xgb_model = XGBClassifier(
             n_estimators=n_estimators,
             max_depth=max_depth,
             learning_rate=learning_rate,
             eval_metric="logloss",
-            reg_lambda=reg_lambda,
-            reg_alpha=reg_alpha,
-            scale_pos_weight=scale_pos_weight,
-            subsample=subsample,
-            colsample_bytree=colsample_bytree,
-            min_child_weight=min_child_weight,
-            gamma=gamma,
             random_state=random_state,
         )
-        xgb_model.fit(
-            X_train, y_train,
-            sample_weight=w_train,
-            eval_set=[(X_val, y_val)],
-            sample_weight_eval_set=[w_val],
-            verbose=False,
-        )
+        xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
-        user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df, feature_config)
-        candidate_pool = article_encoded.sort_values("sales_volume", ascending=False)
-        if candidate_pool_size is not None:
-            candidate_pool = candidate_pool.head(candidate_pool_size)
+        user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df)
+        candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
         user_encoded_indexed = user_encoded.set_index("customer_id")
 
         predicciones = []
@@ -362,71 +230,11 @@ def entrenar_modelo_xgboost(
     return resultado
 
 
-def entrenar_modelo_cluster_xgboost(
-    df_train, eval_users, actual,
-    df_merged, candidate_pool, user_encoded, xgb_model, feature_cols,
-    k_eval=12,
-    run_name="cluster_xgb_hybrid",
-    extra_params=None,
-):
-    """
-    Híbrido cluster + XGBoost, reutiliza los modelos ya entrenados por
-    entrenar_modelo_cluster y entrenar_modelo_xgboost (no reentrena nada).
-
-    Para cada usuario: primero se acota el pool de candidatos a los
-    clústeres de los que ya ha comprado (misma lógica que
-    recommend_by_cluster_similarity) y, dentro de ese pool reducido, se
-    rankea con el modelo XGBoost ya entrenado (mismo candidate_pool que usa
-    entrenar_modelo_xgboost, solo que aquí se filtra por clúster antes de
-    puntuar).
-    """
-    with mlflow.start_run(run_name=run_name):
-        params = {"k_eval": k_eval}
-        if extra_params:
-            params.update(extra_params)
-        mlflow.log_params(params)
-
-        user_encoded_indexed = user_encoded.set_index("customer_id")
-        candidate_pool_indexed = candidate_pool.set_index("article_id")
-        cluster_por_articulo = df_merged.set_index("article_id")["cluster"]
-
-        predicciones = []
-        for u in eval_users:
-            if u not in user_encoded_indexed.index:
-                predicciones.append([])
-                continue
-
-            bought = df_train.loc[df_train["customer_id"] == u, "article_id"].unique()
-            clusters_bought = cluster_por_articulo.reindex(bought).dropna().unique()
-            if len(clusters_bought) == 0:
-                predicciones.append([])
-                continue
-
-            candidatos_cluster = cluster_por_articulo[cluster_por_articulo.isin(clusters_bought)].index
-            candidate_ids = candidate_pool_indexed.index.intersection(candidatos_cluster).difference(bought)
-            if len(candidate_ids) == 0:
-                predicciones.append([])
-                continue
-            candidate_df = candidate_pool_indexed.loc[candidate_ids].reset_index()
-
-            user_row = user_encoded_indexed.loc[u]
-            recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_df, feature_cols, top_n=k_eval)
-            predicciones.append(recs["article_id"].tolist())
-
-        map12 = models.mapk(actual, predicciones, k=k_eval)
-        mlflow.log_metric("map12", map12)
-        print(f"[Cluster+XGB] {run_name} -> MAP@12 = {map12:.4f}")
-
-    return predicciones, map12
-
-
 def main():
-    t_total_0 = time.time()
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
     print(f"Cargando muestra de {N_CUSTOMERS} clientes...")
-    t_load_0 = time.time()
     df_customers, df_products, df_transactions = preprocess.load_complete_dataset_filtered_number_customers(
         N_CUSTOMERS, random_state=RANDOM_STATE
     )
@@ -434,7 +242,6 @@ def main():
         df_transactions, min_purchases=MIN_PURCHASES, max_months_since_last_purchase=MAX_MONTHS_SINCE_LAST_PURCHASE
     )
     print(f"Transacciones tras filtro de actividad: {len(df_transactions):,}")
-    print(f"Tiempo cargando: {time.time() - t_load_0:.2f}s")
 
     df_train, df_test, eval_users, actual = leave_one_out_split(df_transactions)
     print(f"Usuarios de evaluación: {len(eval_users):,}  |  train: {len(df_train):,}  |  test: {len(df_test):,}")
@@ -458,60 +265,27 @@ def main():
         df_train, eval_users, actual, k_eval=K_EVAL, extra_params=extra_params_datos,
     )
 
-    _, map_itemitem = entrenar_modelo_item_item(
-        df_train, eval_users, actual, k_eval=K_EVAL,
-        extra_params=extra_params_datos,
-    )
-
     print("Entrenando modelo de clustering...")
-    t_cluster_0 = time.time()
     resultado_cluster = entrenar_modelo_cluster(
         df_customers, df_products, df_train, eval_users, actual,
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
         extra_params=extra_params_datos,
     )
-    print(f"Tiempo entrenado modelo de clustering: {time.time() - t_cluster_0:.2f}s")
-    print("Generando diccionarios de clústeres para Hard Negatives...")
-    df_clusters_result = resultado_cluster["df_merged"] 
-    mapa_articulo_cluster = df_clusters_result.set_index('article_id')['cluster'].to_dict()
-    articulos_por_cluster = df_clusters_result.groupby('cluster')['article_id'].apply(list).to_dict()
+
     print("Entrenando modelo XGBoost...")
-    t_xgboost_0 = time.time()
     resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,
-        **XGB_BASE_HYPERPARAMS,
-        candidate_pool_size=CANDIDATE_POOL_SIZE,
-        k_eval=K_EVAL, random_state=RANDOM_STATE,
-        run_name=XGB_RUN_NAME,
-        feature_config=XGB_FEATURE_CONFIG,
-        mapa_articulo_cluster=mapa_articulo_cluster,
-        articulos_por_cluster=articulos_por_cluster,
-        category_weights=XGB_CATEGORY_WEIGHTS,
-        extra_params=extra_params_datos,
+        n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH, learning_rate=XGB_LEARNING_RATE,
+        n_negativos_por_positivo=N_NEGATIVOS_POR_POSITIVO, candidate_pool_size=CANDIDATE_POOL_SIZE,
+        k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,
     )
-    print(f"Tiempo entrenado modelo XGBoost: {time.time() - t_xgboost_0:.2f}s")
-    print("Entrenando modelo híbrido Cluster + XGBoost...")
-    t_cluster_xgb_0 = time.time()
-    _, map_cluster_xgb = entrenar_modelo_cluster_xgboost(
-        df_train, eval_users, actual,
-        df_merged=resultado_cluster["df_merged"],
-        candidate_pool=resultado_xgboost["candidate_pool"],
-        user_encoded=resultado_xgboost["user_encoded"],
-        xgb_model=resultado_xgboost["xgb_model"],
-        feature_cols=resultado_xgboost["feature_cols"],
-        k_eval=K_EVAL,
-        extra_params=extra_params_datos,
-    )
-    print(f"Tiempo entrenado modelo híbrido Cluster + XGBoost: {time.time() - t_cluster_xgb_0:.2f}s")
-    t_eval_0 = time.time() #tiempo de evaluación
+
     # --- Métricas ---
     raw_metrics = {
         "Random": map_random,
         "Popular": map_popular,
-        "ItemItem": map_itemitem,
         "Cluster": resultado_cluster["map12"],
         "XGBoost": resultado_xgboost["map12"],
-        "ClusterXGBoost": map_cluster_xgb,
     }
     print("MAP@12:")
     for name, score in sorted(raw_metrics.items(), key=lambda x: -x[1]):
@@ -552,8 +326,6 @@ def main():
     )
 
     print(f"\nArtefactos guardados en {MODELS_DIR}")
-    print(f"Tiempo de evaluación: {time.time() - t_eval_0:.2f}s")
-    print(f"Tiempo total: {time.time() - t_total_0:.2f}s")
 
 
 if __name__ == "__main__":
