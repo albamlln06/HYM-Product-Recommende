@@ -46,7 +46,7 @@ def run_family(run_name: str) -> str:
 app = FastAPI(title="Panel de recomendación de productos")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5174"],
+    allow_origins=["http://localhost:5173"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
@@ -63,6 +63,8 @@ candidate_articles = pd.read_parquet(MODELS_DIR / "candidate_articles.parquet")
 customers = pd.read_parquet(MODELS_DIR / "customers.parquet")
 customers_xgb_features = pd.read_parquet(MODELS_DIR / "customers_xgb_features.parquet")
 train_transactions = pd.read_parquet(MODELS_DIR / "train_transactions.parquet")
+bpr_user_factors = pd.read_parquet(MODELS_DIR / "bpr_user_factors.parquet").set_index("customer_id")
+bpr_item_factors = pd.read_parquet(MODELS_DIR / "bpr_item_factors.parquet").set_index("article_id")
 
 cluster_X_final = np.load(MODELS_DIR / "cluster_X_final.npy")
 cluster_article_ids = np.load(MODELS_DIR / "cluster_article_ids.npy")
@@ -70,6 +72,11 @@ X_df = pd.DataFrame(cluster_X_final, index=cluster_article_ids)
 
 customers_indexed = customers.set_index("customer_id")
 customers_xgb_indexed = customers_xgb_features.set_index("customer_id")
+
+# Para acotar las recomendaciones de XGBoost al género (index_group_name) del
+# cliente cuando solo ha comprado de uno (ver get_customer_recommendations).
+article_to_gender = article_features.set_index("article_id")["index_group_name"].to_dict()
+candidate_articles_genero = candidate_articles["article_id"].map(article_to_gender)
 
 article_display_cols = [
     "article_id", "prod_name", "product_type_name", "product_group_name",
@@ -115,6 +122,8 @@ def get_mlflow_runs():
     for _, row in runs_df.iterrows():
         run_name = row.get("tags.mlflow.runName") or row["run_id"][:8]
         map12 = row.get("metrics.map12")
+        cat_hit_test = row.get("metrics.category_hit_rate_test")
+        cat_hit_general = row.get("metrics.category_hit_rate_general")
         start_time = row.get("start_time")
         runs.append({
             "run_id": row["run_id"],
@@ -123,6 +132,8 @@ def get_mlflow_runs():
             "status": row["status"],
             "start_time": start_time.isoformat() if pd.notna(start_time) else None,
             "map12": float(map12) if pd.notna(map12) else None,
+            "category_hit_rate_test": float(cat_hit_test) if pd.notna(cat_hit_test) else None,
+            "category_hit_rate_general": float(cat_hit_general) if pd.notna(cat_hit_general) else None,
             "params": {
                 c.removeprefix("params."): row[c]
                 for c in param_cols
@@ -165,9 +176,24 @@ def get_customer_recommendations(customer_id: str):
     )
     cluster_recs = article_cards(cluster_recs_df["article_id"].tolist() if not cluster_recs_df.empty else [])
 
-    user_row = customers_xgb_indexed.loc[customer_id]
+    generos_cliente = set(history_tx["article_id"].map(article_to_gender).dropna())
+    candidate_pool_cliente = candidate_articles
+    if len(generos_cliente) == 1:
+        genero_cliente = next(iter(generos_cliente))
+        pool_filtrado = candidate_articles[candidate_articles_genero == genero_cliente]
+        if not pool_filtrado.empty:
+            candidate_pool_cliente = pool_filtrado
+
+    # bpr_score (señal colaborativa) es una feature cruzada usuario-artículo:
+    # se calcula aquí, contra el candidate_pool ya filtrado por género, igual
+    # que en el bucle de evaluación de entrenar_modelo_xgboost.
+    user_bpr_vector = bpr_user_factors.reindex([customer_id]).fillna(0.0).to_numpy()[0]
+    bpr_scores = models.bpr_dot_scores(candidate_pool_cliente["article_id"], bpr_item_factors, user_bpr_vector)
+    candidate_pool_cliente = candidate_pool_cliente.assign(bpr_score=bpr_scores)
+
+    user_row = customers_xgb_indexed.loc[[customer_id]]
     xgb_recs_df = models.recommend_xgboost_for_user(
-        xgb_model, user_row, candidate_articles, feature_cols, top_n=TOP_N,
+        xgb_model, user_row, candidate_pool_cliente, feature_cols, top_n=TOP_N,
     )
     xgb_recs = article_cards(xgb_recs_df["article_id"].tolist())
 

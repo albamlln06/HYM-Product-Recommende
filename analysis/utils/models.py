@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy.sparse as sp
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
+from implicit.bpr import BayesianPersonalizedRanking
 import xgboost as xgb
 from utils.preprocess import auto_optimize_categories, imputar_nulos_tfm
 
@@ -45,6 +47,11 @@ NUMERIC_FEATURES_XGBOOST = [
     'recency_days',
     'sex_popularity',
     'total_sales_volume',
+    # Ya se calculaban en compute_article_features pero no se usaban como
+    # feature: momentum de ventas (tendencia) y antigüedad del producto,
+    # ambas habituales en las soluciones de la competición H&M de Kaggle.
+    'sales_last_30d',
+    'product_age_days',
 ]
 
 def compute_article_features(df_customers, df_products, df_transactions):
@@ -226,8 +233,14 @@ def compute_cross_features(dataset):
         
     # 3. AFINIDAD DE SECCIÓN
     if 'section_name' in dataset.columns and 'user_favorite_section' in dataset.columns:
-        # 1 si es su sección favorita, 0 si no
-        dataset['cross_is_favorite_section'] = (dataset['section_name'] == dataset['user_favorite_section']).astype('int8')
+        # 1 si es su sección favorita, 0 si no. Comparamos por valor (texto),
+        # no por categoría: section_name y user_favorite_section son dtype
+        # 'category' con conjuntos de categorías distintos (una es de
+        # artículo, la otra de usuario), y pandas no deja comparar
+        # Categoricals directamente si sus categorías no coinciden.
+        dataset['cross_is_favorite_section'] = (
+            dataset['section_name'].astype(str) == dataset['user_favorite_section'].astype(str)
+        ).astype('int8')
 
     return dataset
 
@@ -405,7 +418,61 @@ def generar_negativos_cliente(
 
     return negativos
 
-def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42):
+def train_bpr_model(df_transactions, factors=32, iterations=15, learning_rate=0.05, regularization=0.01, random_state=42):
+    """
+    Entrena un modelo de matrix factorization BPR (Bayesian Personalized
+    Ranking, vía la librería `implicit`) sobre las compras de
+    df_transactions, para capturar señal puramente colaborativa
+    ("clientes que compraron lo mismo que tú también compraron Z") que ni el
+    clustering por atributos de producto ni las features hechas a mano
+    recogen. No se usa como modelo de recomendación aparte: sus vectores
+    latentes se usan como UNA feature más (bpr_score) dentro de XGBoost, ver
+    xgboost_preprocess.
+
+    Devuelve (user_factors_df, item_factors_df): un DataFrame indexado por
+    customer_id / article_id con su vector latente, listo para hacer
+    producto escalar contra cualquier candidato. Un customer_id o article_id
+    que no aparezca en df_transactions simplemente no tiene fila (cold start:
+    se trata luego como vector cero, sin señal).
+    """
+    interacciones = df_transactions[['customer_id', 'article_id']].drop_duplicates()
+    user_codes = interacciones['customer_id'].astype('category')
+    article_codes = interacciones['article_id'].astype('category')
+
+    user_items = sp.csr_matrix(
+        (np.ones(len(interacciones), dtype=np.float32), (user_codes.cat.codes, article_codes.cat.codes)),
+        shape=(len(user_codes.cat.categories), len(article_codes.cat.categories)),
+    )
+
+    bpr_model = BayesianPersonalizedRanking(
+        factors=factors, learning_rate=learning_rate, regularization=regularization,
+        iterations=iterations, random_state=random_state,
+    )
+    bpr_model.fit(user_items, show_progress=False)
+
+    # Nombres de columna en texto (no enteros): hace falta para poder guardar
+    # estos factores en parquet como el resto de artefactos del pipeline.
+    factor_cols = [f"bpr_f{i}" for i in range(bpr_model.user_factors.shape[1])]
+    user_factors_df = pd.DataFrame(bpr_model.user_factors, index=user_codes.cat.categories, columns=factor_cols)
+    item_factors_df = pd.DataFrame(bpr_model.item_factors, index=article_codes.cat.categories, columns=factor_cols)
+    return user_factors_df, item_factors_df
+
+
+def bpr_dot_scores(ids, id_factors_df, other_vector):
+    """
+    Producto escalar entre other_vector (el vector BPR de UN usuario o UN
+    artículo) y el vector de cada elemento de `ids` en id_factors_df.
+    ids sin vector conocido (cold start) puntúan 0.0 (neutral).
+    Vectorizado: sirve igual para 1 candidato que para 50.000.
+    """
+    matrix = id_factors_df.reindex(ids).fillna(0.0).to_numpy()
+    return matrix @ other_vector
+
+
+def xgboost_preprocess(
+    df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
+    bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
+):
     rng = np.random.default_rng(random_state)
 
     # 1. Features de artículo y usuario
@@ -446,6 +513,18 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
 
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
 
+    # 3b. Señal colaborativa (BPR): "quién compró qué", independiente de los
+    #     atributos de producto. Se añade como una feature más (bpr_score) =
+    #     producto escalar entre el vector latente del cliente y el del
+    #     artículo, vectorizado para todo el dataset a la vez.
+    user_factors_df, item_factors_df = train_bpr_model(
+        df_transactions, factors=bpr_factors, iterations=bpr_iterations,
+        regularization=bpr_regularization, random_state=random_state,
+    )
+    user_matrix = user_factors_df.reindex(dataset['customer_id']).fillna(0.0).to_numpy()
+    item_matrix = item_factors_df.reindex(dataset['article_id']).fillna(0.0).to_numpy()
+    dataset['bpr_score'] = (user_matrix * item_matrix).sum(axis=1)
+
     # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
     user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df)
 
@@ -455,38 +534,67 @@ def xgboost_preprocess(df_customers, df_products, df_transactions, n_negativos_p
         .merge(user_encoded,       on='customer_id', how='left')
         .merge(article_encoded, on='article_id',  how='left')
     )
-    #imputamos los nulos
-    dataset = imputar_nulos_tfm(dataset)
-    #Convertimos los textos a categorías para ahorrar memoria RAM
-    # 6. Separar X e y
+    # 5b. Cross features usuario-artículo (afinidad de precio/edad/sección):
+    #     puramente aritméticas sobre columnas ya presentes, sin depender de
+    #     si ese artículo en concreto se compró (a diferencia de un flag de
+    #     recompra, esto no se filtra con el label y no tiene fuga de datos).
+    dataset = compute_cross_features(dataset)
+    # La imputación de categóricas (p.ej. club_member_status -> 'GUEST') ya se
+    # hizo en encode_xgboost_categoricals, antes del cast a 'category' (un
+    # fillna posterior sobre una columna category rompe si el valor no es ya
+    # una categoría existente).
+    # 6. Separar X e y. Las categóricas (dtype 'category', ver
+    #    encode_xgboost_categoricals) se dejan tal cual para que XGBoost las
+    #    trate de forma nativa; solo las numéricas se rellenan y castean.
     cols_no_feature = ['customer_id', 'article_id', 'label']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]
 
-    X = dataset[feature_cols].fillna(0).astype(float)
+    X = dataset[feature_cols].copy()
+    num_feature_cols = [c for c in feature_cols if not isinstance(X[c].dtype, pd.CategoricalDtype)]
+    X[num_feature_cols] = X[num_feature_cols].fillna(0).astype(float)
     y = dataset['label']
 
     print(f"Positivos: {len(positivos):,}  |  Negativos: {len(negativos):,}")
     print(f"X shape: {X.shape}  |  Features: {len(feature_cols)}")
 
-    return X, y, dataset, article_df, user_df
+    return X, y, dataset, article_df, user_df, user_factors_df, item_factors_df
 
 
 def encode_xgboost_categoricals(user_df, article_df):
     """
-    Aplica el one-hot encoding de usuario y artículo usado por XGBoost.
+    Prepara las categóricas de usuario y artículo para las categóricas
+    NATIVAS de XGBoost (enable_categorical=True): en vez de one-hot
+    (pd.get_dummies, que antes explotaba a cientos de columnas y ralentizaba
+    entrenamiento e inferencia), se dejan como dtype 'category' y es el
+    propio XGBoost quien aprende los splits sobre esas categorías.
 
     Se comparte entre xgboost_preprocess (entrenamiento) y el servido en vivo
-    de recomendaciones, para que ambos generen exactamente las mismas columnas.
+    de recomendaciones, para que ambos usen exactamente las mismas categorías.
+
+    Importante: load_dataset() ya convierte columnas de texto a 'category'
+    para ahorrar memoria (auto_optimize_categories), así que club_member_status
+    puede llegar aquí siendo category SIN 'GUEST' entre sus categorías. Un
+    fillna con un valor que no sea ya una categoría existente falla, así que
+    se vuelve a texto plano antes de imputar y se re-categoriza después.
     """
     cat_user = [c for c in ['club_member_status', 'user_favorite_section'] if c in user_df.columns]
-    user_encoded = pd.get_dummies(user_df, columns=cat_user, dummy_na=False) if cat_user else user_df.copy()
+    user_encoded = user_df.copy()
+    for col in cat_user:
+        if isinstance(user_encoded[col].dtype, pd.CategoricalDtype):
+            user_encoded[col] = user_encoded[col].astype(object)
+    user_encoded = imputar_nulos_tfm(user_encoded)
+    for col in cat_user:
+        user_encoded[col] = user_encoded[col].astype('category')
 
     available_cat = [c for c in CATEGORICAL_FEATURES_XGBOOST if c in article_df.columns]
-    article_encoded = pd.get_dummies(
-        article_df[['article_id'] + available_cat + NUMERIC_FEATURES_XGBOOST],
-        columns=available_cat,
-        dummy_na=False,
-    )
+    article_encoded = article_df[['article_id'] + available_cat + NUMERIC_FEATURES_XGBOOST].copy()
+    for col in available_cat:
+        if isinstance(article_encoded[col].dtype, pd.CategoricalDtype):
+            article_encoded[col] = article_encoded[col].astype(object)
+    article_encoded = imputar_nulos_tfm(article_encoded)
+    for col in available_cat:
+        article_encoded[col] = article_encoded[col].astype('category')
+
     return user_encoded, article_encoded
 
 
@@ -494,8 +602,12 @@ def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols,
     """
     Rankea un pool fijo de artículos candidatos para un usuario con un XGBRanker ya entrenado.
 
-    user_features : dict o Series con las features de UN usuario, ya codificadas
-                    (salida de encode_xgboost_categoricals para ese customer_id).
+    user_features : DataFrame de UNA fila con las features del usuario, ya
+                    codificadas (salida de encode_xgboost_categoricals para
+                    ese customer_id, p.ej. user_encoded_indexed.loc[[u]]).
+                    Tiene que ser un DataFrame de 1 fila, no una Series: al
+                    convertir una fila a Series se pierde el dtype
+                    'category' de las columnas categóricas.
     candidate_df  : DataFrame con columna 'article_id' + features de artículo codificadas
                     (el 'article_encoded' de encode_xgboost_categoricals, filtrado al pool
                     de candidatos, p.ej. los artículos más vendidos).
@@ -503,11 +615,15 @@ def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols,
                     para alinear el orden/presencia de columnas en la inferencia.
     """
     n = len(candidate_df)
-    user_block = pd.DataFrame([user_features] * n).reset_index(drop=True)
+    user_block = pd.concat([user_features] * n, ignore_index=True)
     article_block = candidate_df.reset_index(drop=True)
 
     combined = pd.concat([user_block, article_block], axis=1)
-    X_infer = combined.reindex(columns=feature_cols, fill_value=0).fillna(0).astype(float)
+    combined = compute_cross_features(combined)
+    combined = combined.reindex(columns=feature_cols)
+    num_cols = [c for c in feature_cols if not isinstance(combined[c].dtype, pd.CategoricalDtype)]
+    combined[num_cols] = combined[num_cols].fillna(0).astype(float)
+    X_infer = combined
 
     scores = model.predict(X_infer)
 
@@ -537,6 +653,48 @@ def apk(actual, predicted, k=12):
 
 def mapk(actual, predicted, k=12):
     return np.mean([apk(a, p, k) for a, p in zip(actual, predicted)])
+
+
+def hits_at_k(actual, predicted, k=12):
+    """Nº de artículos EXACTOS acertados (SKU real) en las k primeras recos de UN usuario."""
+    predicted = predicted[:k]
+    return sum(1 for p in predicted if p in actual)
+
+
+def total_hits(actual_list, predicted_list, k=12):
+    """Suma de aciertos exactos de artículo en toda la evaluación (todos los usuarios)."""
+    return int(sum(hits_at_k(a, p, k) for a, p in zip(actual_list, predicted_list)))
+
+
+def hit_rate(actual_list, predicted_list, k=12):
+    """Fracción de usuarios con AL MENOS 1 acierto exacto en sus k primeras recos."""
+    if not actual_list:
+        return 0.0
+    return float(np.mean([hits_at_k(a, p, k) > 0 for a, p in zip(actual_list, predicted_list)]))
+
+
+def category_hit_rate(actual_categories, predicted_article_ids, article_to_category, k=12):
+    """
+    Métrica más laxa que MAP@12: en vez de exigir acertar el artículo exacto,
+    mide qué fracción de las k primeras recomendaciones caen en una categoría
+    "correcta" para ese usuario (actual_categories = un set de categorías).
+
+    Sirve para distinguir un modelo que recomienda cosas del estilo del
+    usuario pero no el SKU exacto (razonable) de uno que recomienda categorías
+    que no tienen nada que ver (malo), algo que MAP@12 por sí solo no ve.
+    """
+    predicted = predicted_article_ids[:k]
+    if not predicted or not actual_categories:
+        return 0.0
+    aciertos = sum(1 for a in predicted if article_to_category.get(a) in actual_categories)
+    return aciertos / len(predicted)
+
+
+def mean_category_hit_rate(actual_categories_list, predicted_list, article_to_category, k=12):
+    return float(np.mean([
+        category_hit_rate(cats, preds, article_to_category, k)
+        for cats, preds in zip(actual_categories_list, predicted_list)
+    ]))
 
 # ==========================================
 # MODELOS BASE
