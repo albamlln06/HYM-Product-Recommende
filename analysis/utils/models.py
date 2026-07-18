@@ -1,5 +1,5 @@
 from datetime import datetime
-
+import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -476,6 +476,7 @@ def generar_negativos_cliente(
     # ==========================================
     # 2. HARD NEGATIVES (Del mismo clúster)
     # ==========================================
+    t_hard_0 = time.time()
     if mapa_articulo_cluster is not None and articulos_por_cluster is not None:
         articulos_reales = positivos_cliente['article_id'].tolist()
         
@@ -498,7 +499,7 @@ def generar_negativos_cliente(
                     negativos.append({"customer_id": cliente, "article_id": c, "label": 0})
                     n_hard_generados += 1
                     comprados.add(c)
-
+    print(f"Tiempo generando Hard Negatives: {time.time() - t_hard_0:.2f}s")
     return negativos
 
 

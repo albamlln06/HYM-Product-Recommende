@@ -314,7 +314,8 @@ def entrenar_modelo_xgboost(
         mlflow.log_param("features_user_numeric",       cfg["user_numeric"])
         mlflow.log_param("features_user_categorical",   cfg["user_categorical"])
         mlflow.log_param("category_weights", category_weights)
-
+        print('Iniciando preproceamiento del XGBoost')
+        t_preproc_0 = time.time()
         X, y, sample_weight, dataset, article_df, user_df, categorical_categories = models.xgboost_preprocess(
             df_customers, df_products, df_train,
             n_negativos_faciles=n_negativos_faciles,
@@ -328,7 +329,7 @@ def entrenar_modelo_xgboost(
         
         feature_cols = list(X.columns)
     
-        
+        print(f"Tiempo preprocesado: {time.time() - t_preproc_0:.2f}s")
         # Separación en entrenamiento y validación
         X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
             X, y, sample_weight, test_size=0.2, random_state=random_state, stratify=y
@@ -456,7 +457,7 @@ def entrenar_modelo_cluster_xgboost(
     run_name="cluster_xgb_hybrid",
     extra_params=None,
 ):
-    """
+    """"
     Híbrido cluster + XGBoost, reutiliza los modelos ya entrenados por
     entrenar_modelo_cluster y entrenar_modelo_xgboost (no reentrena nada).
 
@@ -577,7 +578,7 @@ def main():
         extra_params=extra_params_datos,
     )
     print(f"Tiempo entrenado modelo XGBoost: {time.time() - t_xgboost_0:.2f}s")
-    print("Entrenando modelo híbrido Cluster + XGBoost...")
+    comentario = '''print("Entrenando modelo híbrido Cluster + XGBoost...")
     t_cluster_xgb_0 = time.time()
     _, map_cluster_xgb = entrenar_modelo_cluster_xgboost(
         df_train, eval_users, actual,
@@ -590,7 +591,7 @@ def main():
         extra_params=extra_params_datos,
     )
     print(f"Tiempo entrenado modelo híbrido Cluster + XGBoost: {time.time() - t_cluster_xgb_0:.2f}s")
-    t_eval_0 = time.time() #tiempo de evaluación
+    t_eval_0 = time.time() #tiempo de evaluación'''
     # --- Métricas ---
     raw_metrics = {
         "Random": map_random,
@@ -598,7 +599,6 @@ def main():
         "ItemItem": map_itemitem,
         "Cluster": resultado_cluster["map12"],
         "XGBoost": resultado_xgboost["map12"],
-        "ClusterXGBoost": map_cluster_xgb,
     }
     print("MAP@12:")
     for name, score in sorted(raw_metrics.items(), key=lambda x: -x[1]):
@@ -625,6 +625,9 @@ def main():
     joblib.dump(resultado_cluster["kmeans_model"], MODELS_DIR / "kmeans.joblib")
     joblib.dump(resultado_cluster["scaler"], MODELS_DIR / "scaler.joblib")
     joblib.dump(resultado_xgboost["xgb_model"], MODELS_DIR / "xgboost_model.joblib")
+    joblib.dump(resultado_xgboost.get("categorical_categories"), MODELS_DIR / "categorical_categories.joblib")  
+    joblib.dump(resultado_xgboost.get("categorical_cols"), MODELS_DIR / "categorical_cols.joblib")              
+
     (MODELS_DIR / "xgboost_feature_cols.json").write_text(json.dumps(resultado_xgboost["feature_cols"]))
 
     np.save(MODELS_DIR / "cluster_X_final.npy", resultado_cluster["X_final"])
@@ -633,13 +636,11 @@ def main():
     resultado_cluster["df_merged"].to_parquet(MODELS_DIR / "article_features.parquet", index=False)
     resultado_xgboost["candidate_pool"].to_parquet(MODELS_DIR / "candidate_articles.parquet", index=False)
     resultado_xgboost["user_df"].to_parquet(MODELS_DIR / "customers.parquet", index=False)
-    resultado_xgboost["user_encoded"].to_parquet(MODELS_DIR / "customers_xgb_features.parquet", index=False)
     df_train[["customer_id", "article_id", "t_dat", "price", "is_online"]].to_parquet(
         MODELS_DIR / "train_transactions.parquet", index=False
     )
 
     print(f"\nArtefactos guardados en {MODELS_DIR}")
-    print(f"Tiempo de evaluación: {time.time() - t_eval_0:.2f}s")
     print(f"Tiempo total: {time.time() - t_total_0:.2f}s")
 
 
