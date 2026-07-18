@@ -12,7 +12,12 @@ def load_dataset():
     df_customers = pd.read_parquet(DATA_DIR / 'customers.parquet')
     df_products = pd.read_parquet(DATA_DIR / 'articles.parquet')
     df_transactions = pd.read_parquet(DATA_DIR / 'transactions_train.parquet')
-    
+    #Forzar mismos tipos para el JOIN
+    df_customers['customer_id'] = df_customers['customer_id'].astype(str)
+    df_products['article_id'] = df_products['article_id'].astype(str)
+
+    df_transactions['customer_id'] = df_transactions['customer_id'].astype(str)
+    df_transactions['article_id'] = df_transactions['article_id'].astype(str)
     # Centralizamos aquí la conversión a datetime para que aplique a todo
     if 't_dat' in df_transactions.columns:
         df_transactions['t_dat'] = pd.to_datetime(df_transactions['t_dat'])
@@ -173,10 +178,18 @@ def imputar_nulos_tfm(df):
             
     # 2. Variables de Fidelización (Textos/Categorías)
     if 'fashion_news_frequency' in df_clean.columns:
-        # Primero unificamos si hay alguna escrita como 'None' en minúsculas, luego rellenamos los nulos
+        # Protegemos si es categórica
+        if df_clean['fashion_news_frequency'].dtype.name == 'category':
+            if 'NONE' not in df_clean['fashion_news_frequency'].cat.categories:
+                df_clean['fashion_news_frequency'] = df_clean['fashion_news_frequency'].cat.add_categories('NONE')
+        # Reemplazamos y rellenamos
         df_clean['fashion_news_frequency'] = df_clean['fashion_news_frequency'].replace('None', 'NONE').fillna('NONE')
         
     if 'club_member_status' in df_clean.columns:
+        # Protegemos si es categórica
+        if df_clean['club_member_status'].dtype.name == 'category':
+            if 'GUEST' not in df_clean['club_member_status'].cat.categories:
+                df_clean['club_member_status'] = df_clean['club_member_status'].cat.add_categories('GUEST')
         df_clean['club_member_status'] = df_clean['club_member_status'].fillna('GUEST')
         
     # 3. La Edad (Estrategia MVP: Mediana global)
@@ -184,9 +197,13 @@ def imputar_nulos_tfm(df):
         mediana_edad = df_clean['age'].median()
         df_clean['age'] = df_clean['age'].fillna(mediana_edad)
         
-    # 4. Descripciones (Solo por si no las habías filtrado antes)
+    # 4. Descripciones (Aunque la descartes luego, la protegemos por si acaso el pipeline pasa por aquí antes)
     if 'detail_desc' in df_clean.columns:
+        if df_clean['detail_desc'].dtype.name == 'category':
+            if 'Sin descripción' not in df_clean['detail_desc'].cat.categories:
+                df_clean['detail_desc'] = df_clean['detail_desc'].cat.add_categories('Sin descripción')
         df_clean['detail_desc'] = df_clean['detail_desc'].fillna('Sin descripción')
+        
     return df_clean
 
 

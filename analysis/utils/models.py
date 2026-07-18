@@ -555,7 +555,9 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
         .reindex(todos_los_articulos).fillna(1).values
     )
     popularidad = np.where(popularidad <= 0, 1, popularidad)
-    prob_muestreo = popularidad / popularidad.sum()
+    #cambio para probar si el modelo esta muy sesgados que todos los 0 son populares
+    #prob_muestreo = popularidad / popularidad.sum() anterior
+    prob_muestreo = np.ones(len(todos_los_articulos))/len(todos_los_articulos)
     compras_por_cliente = (
         df_transactions.groupby('customer_id')['article_id'].apply(set).to_dict()
     )
@@ -596,18 +598,27 @@ def xgboost_preprocess(df_customers, df_products, df_transactions,
     dataset = imputar_nulos_tfm(dataset)
     #6 Convertimos los textos a categorías para ahorrar memoria RAM
     dataset = auto_optimize_categories(dataset,exclude_cols=['customer_id','article_id'])
+    categorical_categories = {
+        col: dataset[col].cat.categories
+        for col in dataset.select_dtypes(include=['category']).columns
+    }
     # 7. Separar X e y
-    cols_no_feature = ['customer_id', 'article_id', 'label', 'sample_weight','prod_name', 'detail_desc']
+    cols_no_feature = ['customer_id', 'article_id', 'label', 'sample_weight','detail_desc','prod_name']
     feature_cols    = [c for c in dataset.columns if c not in cols_no_feature]
 
     X = dataset[feature_cols].copy()
     y = dataset['label']
     sample_weight = dataset['sample_weight']
+    print("\n" + "="*50)
+    print("AUDITORÍA DE MATRIZ X (Entrenamiento)")
+    print("="*50)
+    print(f"Dimensiones de X: {X.shape[0]} filas x {X.shape[1]} columnas")
+    print("\nListado de variables y sus tipos de datos:")
 
     print(f"Positivos: {len(positivos):,}  |  Negativos: {len(negativos):,}")
     print(f"X shape: {X.shape}  |  Features: {len(feature_cols)}")
 
-    return X, y, sample_weight, dataset, article_df, user_df
+    return X, y, sample_weight, dataset, article_df, user_df, categorical_categories
 
 
 def encode_xgboost_categoricals(user_df, article_df, feature_config=None):
@@ -640,28 +651,55 @@ def encode_xgboost_categoricals(user_df, article_df, feature_config=None):
     return user_encoded, article_encoded
 
 
-def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols, top_n=12):
+def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols, categorical_cols,categorical_categories, top_n=12):
     """
     Rankea un pool fijo de artículos candidatos para un usuario con un XGBClassifier ya entrenado.
 
-    user_features : dict o Series con las features de UN usuario, ya codificadas
-                    (salida de encode_xgboost_categoricals para ese customer_id).
-    candidate_df  : DataFrame con columna 'article_id' + features de artículo codificadas
-                    (el 'article_encoded' de encode_xgboost_categoricals, filtrado al pool
-                    de candidatos, p.ej. los artículos más vendidos).
-    feature_cols  : columnas exactas usadas en el entrenamiento (X.columns de xgboost_preprocess),
-                    para alinear el orden/presencia de columnas en la inferencia.
+    user_features    : dict o Series con las features de UN usuario sin codificar.
+    candidate_df     : DataFrame con 'article_id' + features de artículo sin codificar.
+    feature_cols     : columnas exactas usadas en el entrenamiento (X.columns).
+    categorical_cols : lista de columnas que se convirtieron a 'category' en el train.
+    categorical_categories : lista con los valores de cada categoría del train para que puedas decodificar las predicciones
     """
-    n = len(candidate_df)
-    user_block = pd.DataFrame([user_features] * n).reset_index(drop=True)
-    article_block = candidate_df.reset_index(drop=True)
+      
+   # 1 Nueva construcción más eficiente replicamos columna a columna en vez de pd.concat()
+    combined = candidate_df.copy()
+    
+    if isinstance(user_features, pd.DataFrame):
+        user_dict = user_features.iloc[0].to_dict()
+    else:
+        user_dict = dict(user_features)
+        
+    for col, val in user_dict.items():
+        combined[col] = val
+    
 
-    combined = pd.concat([user_block, article_block], axis=1)
-    X_infer = combined.reindex(columns=feature_cols, fill_value=0).fillna(0).astype(float)
+    # 2. Calcular cross_features AHORA que usuario y artículo están en la misma fila
+    combined = compute_cross_features(combined)
+    
+    # 3. Limpieza idéntica a la del entrenamiento
+    combined = imputar_nulos_tfm(combined)
 
+    # 4. Alinear columnas con feature_cols (Como tu original, pero SIN el .astype(float) global)
+    X_infer = combined.reindex(columns=feature_cols)
+
+    # 5. Forzar el tipo 'category' SOLO a las columnas que XGBoost espera
+    for col in categorical_cols:
+        if col in X_infer.columns:
+            cats = categorical_categories.get(col)
+            X_infer[col] = pd.Categorical(X_infer[col], categories=cats)
+
+    # 6. Para el resto de columnas, nos aseguramos de que sean numéricas nativas (float/int)
+    # y evitamos cualquier tipo 'object' residual que rompa el predict.
+    cols_numericas = [c for c in X_infer.columns if c not in categorical_cols]
+    X_infer[cols_numericas] = X_infer[cols_numericas].astype(float)
+
+    # 7. Predicción y ranking
     scores = model.predict_proba(X_infer)[:, 1]
-
+    
+    # Asignamos score al article_block original para no perder IDs ni ensuciar datos
     ranked = candidate_df.assign(score=scores).sort_values('score', ascending=False)
+    
     return ranked.head(top_n)[['article_id', 'score']].reset_index(drop=True)
 
 

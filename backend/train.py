@@ -53,13 +53,13 @@ K_CLUSTERS = 8
 # Ponle un número solo si necesitas acotar el coste de cómputo al escalar
 # N_CUSTOMERS; con un número bajo, los artículos poco vendidos quedan fuera
 # del pool y el modelo nunca puede recomendarlos, tunees lo que tunees.
-CANDIDATE_POOL_SIZE = None
-N_NEGATIVOS_FACILES = 3
-N_NEGATIVOS_DIFICILES = 3
-XGB_N_ESTIMATORS = 150
+CANDIDATE_POOL_SIZE = 3000
+N_NEGATIVOS_FACILES = 4
+N_NEGATIVOS_DIFICILES = 4
+XGB_N_ESTIMATORS = 300
 XGB_MAX_DEPTH = 5
 XGB_LEARNING_RATE = 0.05
-XGB_REG_LAMBDA = 15
+XGB_REG_LAMBDA = 10
 XGB_SCALE_POS_WEIGHT = 1
 
 # Por defecto usan el valor por defecto de XGBoost (= sin efecto); ajústalos
@@ -115,8 +115,12 @@ mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
 def leave_one_out_split(df_transactions):
     last_purchase_idx = df_transactions.groupby("customer_id")["t_dat"].idxmax()
-    df_test = df_transactions.loc[last_purchase_idx]
-    df_train = df_transactions.drop(index=last_purchase_idx)
+    # 2. Extraemos el 'transaction_id' exacto correspondiente a esa última compra
+    last_transaction_ids = df_transactions.loc[last_purchase_idx, "transaction_id"]
+    is_last_transaction = df_transactions["transaction_id"].isin(last_transaction_ids)
+    
+    df_test = df_transactions[is_last_transaction].copy()
+    df_train = df_transactions[~is_last_transaction].copy()
 
     users_with_train = set(df_train["customer_id"].unique())
     eval_users = [u for u in df_test["customer_id"].unique() if u in users_with_train]
@@ -129,7 +133,6 @@ def leave_one_out_split(df_transactions):
     )
     actual = [ground_truth[u] for u in eval_users]
     return df_train, df_test, eval_users, actual
-
 
 def entrenar_modelo_random(df_train, eval_users, actual, k_eval=12, seed=42, run_name="baseline_random", extra_params=None):
     """Baseline: recomienda artículos al azar. Sirve para tener un suelo de referencia."""
@@ -312,7 +315,7 @@ def entrenar_modelo_xgboost(
         mlflow.log_param("features_user_categorical",   cfg["user_categorical"])
         mlflow.log_param("category_weights", category_weights)
 
-        X, y, sample_weight, dataset, article_df, user_df = models.xgboost_preprocess(
+        X, y, sample_weight, dataset, article_df, user_df, categorical_categories = models.xgboost_preprocess(
             df_customers, df_products, df_train,
             n_negativos_faciles=n_negativos_faciles,
             n_negativos_dificiles=n_negativos_dificiles,
@@ -324,10 +327,15 @@ def entrenar_modelo_xgboost(
         )
         
         feature_cols = list(X.columns)
-
+    
+        
+        # Separación en entrenamiento y validación
         X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
             X, y, sample_weight, test_size=0.2, random_state=random_state, stratify=y
         )
+        
+        t_xgboost_0 = time.time()
+        
         xgb_model = XGBClassifier(
             n_estimators=n_estimators,
             max_depth=max_depth,
@@ -340,51 +348,106 @@ def entrenar_modelo_xgboost(
             colsample_bytree=colsample_bytree,
             min_child_weight=min_child_weight,
             gamma=gamma,
+            # Variables fijas
             tree_method="hist",
+            enable_categorical=True,
             n_jobs=-1,
             random_state=random_state,
             early_stopping_rounds=10,
         )
+        
         xgb_model.fit(
             X_train, y_train,
-            #sample_weight=w_train,
+            # sample_weight=w_train,
             eval_set=[(X_val, y_val)],
-            #sample_weight_eval_set=[w_val],
-            verbose=True,
+            # sample_weight_eval_set=[w_val],
+            verbose=False,
         )
+    
+        print(f"Tiempo entrenado modelo XGBoost: {time.time() - t_xgboost_0:.2f}s")
+        predict_t0 = time.time()    
+            # 1. Obtenemos las columnas que son 'category' en el dataset de entrenamiento
+        categorical_cols_train = X.select_dtypes(include=['category']).columns.tolist()
 
-        user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df, feature_config)
-        candidate_pool = article_encoded.sort_values("sales_volume", ascending=False)
+            # 2. Usamos article_df directamente como base (sin el one-hot encoding)
+        candidate_pool = article_df.sort_values("sales_volume", ascending=False)
         if candidate_pool_size is not None:
-            candidate_pool = candidate_pool.head(candidate_pool_size)
-        user_encoded_indexed = user_encoded.set_index("customer_id")
+                candidate_pool = candidate_pool.head(candidate_pool_size)
 
+    
+        # 1. OPTIMIZACIÓN ENORME: Mapeamos los usuarios a un diccionario antes del bucle
+        # Esto hace que buscar a un usuario sea instantáneo (O(1) en lugar de O(N))
+        user_features_dict = user_df.set_index("customer_id").to_dict(orient="index")
         predicciones = []
+        
         for u in eval_users:
-            if u not in user_encoded_indexed.index:
+            # Búsqueda instantánea en el diccionario
+            user_data = user_features_dict.get(u)
+            
+            if user_data is None:
                 predicciones.append([])
                 continue
-            user_row = user_encoded_indexed.loc[u]
-            recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_pool, feature_cols, top_n=k_eval)
+                
+            
+            recs = models.recommend_xgboost_for_user(
+                model=xgb_model,
+                user_features=user_data,  
+                candidate_df=candidate_pool,
+                feature_cols=feature_cols,
+                categorical_cols=categorical_cols_train,
+                categorical_categories=categorical_categories,
+                top_n=k_eval
+            )
+            
+            # Guardamos las recomendaciones del usuario actual
             predicciones.append(recs["article_id"].tolist())
 
+        # Fuera del bucle imprimimos y evaluamos
+        
+        # --- AUDITORÍA CORREGIDA (Para candidate_pool como DataFrame) ---
+        # Extraemos los artículos únicos del DataFrame y los forzamos a string con ceros a la izquierda
+        pool_candidatos_set = {str(x).zfill(10) for x in candidate_pool["article_id"].unique()}
+
+        hits_en_pool = 0       
+        hits_en_top12 = 0      
+        total_objetivos = 0    
+
+        for reales_usuario, predichos_usuario in zip(actual, predicciones):
+            # Aseguramos que reales y predichos sean también strings limpios de 10 dígitos
+            set_reales = {str(x).zfill(10) for x in reales_usuario}
+            set_predichos = {str(x).zfill(10) for x in predichos_usuario}
+            
+            total_objetivos += len(set_reales)
+            
+            # 1. ¿Estaban en el pool de candidatos?
+            hits_en_pool += len(set_reales.intersection(pool_candidatos_set))
+            
+            # 2. ¿El modelo los recomendó en el Top 12?
+            hits_en_top12 += len(set_reales.intersection(set_predichos))
+
+        print("="*60)
+        print("[AUDITORÍA REVISADA] Diagnóstico del Pipeline:")
+        print(f" - Total de artículos reales comprados (Target): {total_objetivos}")
+        print(f" - Artículos que SÍ estaban en tu candidate_pool: {hits_en_pool} (Techo máximo: {(hits_en_pool/total_objetivos*100):.2f}%)")
+        print(f" - Artículos que lograste meter en el Top 12: {hits_en_top12} (Conversión real: {(hits_en_top12/total_objetivos*100):.2f}%)")
+        print("="*60)
+
+        print(f'Tiempo en predecir {time.time() - predict_t0:.2f}s')
         map12 = models.mapk(actual, predicciones, k=k_eval)
         mlflow.log_metric("map12", map12)
         mlflow.xgboost.log_model(xgb_model, name="xgboost_model")
 
         print(f"[XGBoost] {run_name} -> MAP@12 = {map12:.4f}  |  params={params}")
-
-    resultado = {
-        "xgb_model": xgb_model,
-        "feature_cols": feature_cols,
-        "user_df": user_df,
-        "user_encoded": user_encoded,
-        "candidate_pool": candidate_pool,
-        "predicciones": predicciones,
-        "map12": map12,
-    }
-    return resultado
-
+        resultado = {
+                "xgb_model": xgb_model,
+                "feature_cols": feature_cols,
+                "categorical_categories": categorical_categories,
+                "user_df": user_df,
+                "candidate_pool": candidate_pool,
+                "predicciones": predicciones,
+                "map12": map12,
+            }
+        return resultado
 
 def entrenar_modelo_cluster_xgboost(
     df_train, eval_users, actual,
