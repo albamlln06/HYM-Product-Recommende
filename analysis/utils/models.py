@@ -532,6 +532,85 @@ def get_or_train_bpr(df_transactions, bpr_params, cache_dir="model_cache"):
         
     return user_factors_df, item_factors_df
 
+
+import numpy as np
+import pandas as pd
+
+def generar_candidatos_bpr_batch(clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=100):
+    """
+    Genera los top_k candidatos BPR para una lista de clientes procesando en bloques (batches)
+    para maximizar la velocidad usando multiplicación de matrices pura.
+    """
+    batch_size=2048
+    item_ids = item_factors_df.index.to_numpy()
+    # Trasponemos la matriz de artículos para que la multiplicación sea directa: (B, K) @ (K, N) = (B, N)
+    item_matrix_T = item_factors_df.to_numpy().T 
+    
+    # Diccionario rápido para saber en qué columna quedó cada artículo
+    item_id_to_idx = {item_id: idx for idx, item_id in enumerate(item_ids)}
+    
+    resultados = []
+    
+    # Iterar sobre los clientes en bloques gigantes
+    for i in range(0, len(clientes), batch_size):
+        batch_clientes = clientes[i : i + batch_size]
+        
+        # Extraemos la sub-matriz de usuarios del bloque (Cold-start se rellena con 0)
+        user_batch_matrix = user_factors_df.reindex(batch_clientes).fillna(0.0).to_numpy()
+        
+        # MAGIA AQUÍ: Calculamos todos los scores del bloque de golpe
+        # scores_batch tendrá tamaño (tamaño_del_bloque, total_articulos_catalogo)
+        scores_batch = user_batch_matrix @ item_matrix_T
+        
+        # Procesar los resultados de cada usuario dentro del bloque
+        for j, cliente in enumerate(batch_clientes):
+            scores_usuario = scores_batch[j]
+            
+            # Penalizar comprados
+            comprados = compras_por_cliente.get(cliente, set())
+            if comprados:
+                indices_comprados = [item_id_to_idx[item] for item in comprados if item in item_id_to_idx]
+                scores_usuario[indices_comprados] = -np.inf
+            
+            # Extraer Top-K
+            if len(scores_usuario) > top_k:
+                # argpartition separa los Top K súper rápido (pero sin ordenarlos internamente)
+                top_k_indices = np.argpartition(scores_usuario, -top_k)[-top_k:]
+                # Ordenamos solo esos K mejores de mayor a menor score
+                top_k_indices = top_k_indices[np.argsort(-scores_usuario[top_k_indices])]
+            else:
+                top_k_indices = np.argsort(-scores_usuario)
+                
+            top_k_articulos = item_ids[top_k_indices]
+            top_k_scores = scores_usuario[top_k_indices]
+            
+            # Guardar resultados
+            for art_id, score in zip(top_k_articulos, top_k_scores):
+                resultados.append({
+                    "customer_id": cliente,
+                    "article_id": art_id,
+                    "bpr_score": score
+                })
+                       
+    return pd.DataFrame(resultados)
+
+def generar_candidatos_populares(df_train, top_k=100):
+    """
+    Calcula los artículos más vendidos en el último mes disponible en el set de datos.
+    Se asume que df_train tiene columnas 'article_id' y 't_dat'.
+    """
+    
+    # 1. Filtrar el último mes disponible (usando la fecha máxima del dataset)
+    fecha_max = df_train['t_dat'].max()
+    fecha_inicio_mes = fecha_max - pd.Timedelta(days=30)
+    
+    df_reciente = df_train[df_train['t_dat'] >= fecha_inicio_mes]
+    
+    # 3. Contar artículos (el método más rápido en Pandas)
+    top_articulos = df_reciente['article_id'].value_counts().head(top_k).index.tolist()
+    
+    return top_articulos
+
 def xgboost_preprocess(
     df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,

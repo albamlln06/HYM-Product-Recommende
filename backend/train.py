@@ -384,6 +384,9 @@ def entrenar_modelo_xgboost(
         )
         candidate_genero = candidate_pool["article_id"].map(article_to_gender)
         print('Iniciando de predicciones')
+        #Hay que aplicar estrategias: Los que tengan mayor ranking bpr, los más vendidos del último mes, más populares en general, recompras
+        #artículos dentro del cluster de los que compraron, etc
+        #Por ahora esta creada la bpr
         predicciones = []
         for u in eval_users:
             if u not in user_encoded_indexed.index:
