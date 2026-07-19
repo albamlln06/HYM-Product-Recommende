@@ -316,7 +316,7 @@ def entrenar_modelo_xgboost(
         mlflow.log_param("category_weights", category_weights)
         print('Iniciando preproceamiento del XGBoost')
         t_preproc_0 = time.time()
-        X, y, sample_weight, dataset, article_df, user_df, categorical_categories = models.xgboost_preprocess(
+        X, y, sample_weight, dataset, article_df, user_df, categorical_categories,candidate_pool = models.xgboost_preprocess(
             df_customers, df_products, df_train,
             n_negativos_faciles=n_negativos_faciles,
             n_negativos_dificiles=n_negativos_dificiles,
@@ -324,7 +324,8 @@ def entrenar_modelo_xgboost(
             feature_config=feature_config,
             category_weights=category_weights,
             mapa_articulo_cluster=mapa_articulo_cluster,
-            articulos_por_cluster=articulos_por_cluster
+            articulos_por_cluster=articulos_por_cluster,
+            candidate_pool_size=CANDIDATE_POOL_SIZE
         )
         
         feature_cols = list(X.columns)
@@ -371,14 +372,11 @@ def entrenar_modelo_xgboost(
         categorical_cols_train = X.select_dtypes(include=['category']).columns.tolist()
 
             # 2. Usamos article_df directamente como base (sin el one-hot encoding)
-        candidate_pool = article_df.sort_values("sales_volume", ascending=False)
-        if candidate_pool_size is not None:
-                candidate_pool = candidate_pool.head(candidate_pool_size)
-
-    
+        print("Columnas Train", list(X_train.columns))    
         # 1. OPTIMIZACIÓN ENORME: Mapeamos los usuarios a un diccionario antes del bucle
         # Esto hace que buscar a un usuario sea instantáneo (O(1) en lugar de O(N))
         user_features_dict = user_df.set_index("customer_id").to_dict(orient="index")
+        df_candidatos_inferencia = article_df[article_df['article_id'].isin(candidate_pool)].copy()
         predicciones = []
         
         for u in eval_users:
@@ -393,7 +391,7 @@ def entrenar_modelo_xgboost(
             recs = models.recommend_xgboost_for_user(
                 model=xgb_model,
                 user_features=user_data,  
-                candidate_df=candidate_pool,
+                candidate_df=df_candidatos_inferencia,
                 feature_cols=feature_cols,
                 categorical_cols=categorical_cols_train,
                 categorical_categories=categorical_categories,
@@ -407,7 +405,7 @@ def entrenar_modelo_xgboost(
         
         # --- AUDITORÍA CORREGIDA (Para candidate_pool como DataFrame) ---
         # Extraemos los artículos únicos del DataFrame y los forzamos a string con ceros a la izquierda
-        pool_candidatos_set = {str(x).zfill(10) for x in candidate_pool["article_id"].unique()}
+        pool_candidatos_set = {str(x).zfill(10) for x in set(candidate_pool)}
 
         hits_en_pool = 0       
         hits_en_top12 = 0      
@@ -562,7 +560,9 @@ def main():
     print("Generando diccionarios de clústeres para Hard Negatives...")
     df_clusters_result = resultado_cluster["df_merged"] 
     mapa_articulo_cluster = df_clusters_result.set_index('article_id')['cluster'].to_dict()
-    articulos_por_cluster = df_clusters_result.groupby('cluster')['article_id'].apply(list).to_dict()
+    articulos_por_cluster = {cluster_id: grupo['article_id'].to_numpy()
+                            for cluster_id, grupo in df_clusters_result.groupby('cluster')
+    }
     print("Entrenando modelo XGBoost...")
     t_xgboost_0 = time.time()
     resultado_xgboost = entrenar_modelo_xgboost(
@@ -634,7 +634,7 @@ def main():
     np.save(MODELS_DIR / "cluster_article_ids.npy", resultado_cluster["article_ids"])
 
     resultado_cluster["df_merged"].to_parquet(MODELS_DIR / "article_features.parquet", index=False)
-    resultado_xgboost["candidate_pool"].to_parquet(MODELS_DIR / "candidate_articles.parquet", index=False)
+    pd.DataFrame({"article_id": resultado_xgboost["candidate_pool"]}).to_parquet(MODELS_DIR / "candidate_articles.parquet", index=False)
     resultado_xgboost["user_df"].to_parquet(MODELS_DIR / "customers.parquet", index=False)
     df_train[["customer_id", "article_id", "t_dat", "price", "is_online"]].to_parquet(
         MODELS_DIR / "train_transactions.parquet", index=False
