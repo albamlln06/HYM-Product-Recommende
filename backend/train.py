@@ -16,7 +16,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-
+import time
 import joblib
 import mlflow
 import mlflow.sklearn
@@ -25,6 +25,10 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 from xgboost import XGBRanker
+import warnings
+
+# Ocultar específicamente los FutureWarnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
@@ -64,7 +68,7 @@ BPR_ITERATIONS = 50
 BPR_REGULARIZATION = 0.05
 
 # --- MLflow ---
-MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
+MLFLOW_EXPERIMENT_NAME = "hym-recomendator2"
 MLFLOW_TRACKING_URI = f"sqlite:///{Path(__file__).resolve().parent / 'mlflow.db'}"
 
 
@@ -320,14 +324,15 @@ def entrenar_modelo_xgboost(
         if extra_params:
             params.update(extra_params)
         mlflow.log_params(params)
-
+        t0_xgb_preprocess = time.time()
+        print('Inicciando preprocessing XGBoost...')
         X, y, dataset, article_df, user_df, user_factors_df, item_factors_df = models.xgboost_preprocess(
             df_customers, df_products, df_train,
             n_negativos_por_positivo=n_negativos_por_positivo, random_state=random_state,
             bpr_factors=bpr_factors, bpr_iterations=bpr_iterations, bpr_regularization=bpr_regularization,
         )
         feature_cols = list(X.columns)
-
+        
         # XGBRanker necesita las filas agrupadas (contiguas) por query group;
         # aquí el grupo es el cliente, cuyas filas positivas/negativas se rankean entre sí.
         order = dataset["customer_id"].sort_values(kind="stable").index
@@ -336,11 +341,11 @@ def entrenar_modelo_xgboost(
         # qid debe ser numérico: codificamos customer_id (string) a enteros correlativos.
         qid_codes, _ = pd.factorize(dataset.loc[order, "customer_id"], sort=False)
         qid_sorted = pd.Series(qid_codes)
-
+        print(f"Preprocesado XGBoost: {time.time() - t0_xgb_preprocess:.2f}s")
         gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=random_state)
         train_idx, val_idx = next(gss.split(X_sorted, y_sorted, groups=qid_sorted))
         train_idx, val_idx = np.sort(train_idx), np.sort(val_idx)
-
+        t0_xgb_train = time.time()
         X_train, y_train, qid_train = X_sorted.iloc[train_idx], y_sorted.iloc[train_idx], qid_sorted.iloc[train_idx]
         X_val, y_val, qid_val = X_sorted.iloc[val_idx], y_sorted.iloc[val_idx], qid_sorted.iloc[val_idx]
 
@@ -359,7 +364,8 @@ def entrenar_modelo_xgboost(
             eval_set=[(X_val, y_val)], eval_qid=[qid_val],
             verbose=False,
         )
-
+        print(f"Entrenamiento XGBoost: {time.time() - t0_xgb_train:.2f}s")
+        t0_infer = time.time()
         user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df)
         candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
         user_encoded_indexed = user_encoded.set_index("customer_id")
@@ -416,7 +422,7 @@ def entrenar_modelo_xgboost(
             f"[XGBoost] {run_name} -> MAP@12 = {map12:.4f}  |  CatTest = {cat_hit_test:.4f}  |  "
             f"CatGeneral = {cat_hit_general:.4f}  |  Aciertos = {total_hits}  |  HitRate = {hit_rate:.4f}  |  params={params}"
         )
-
+        print(f"Inferencia XGBoost: {time.time() - t0_infer:.2f}s")
     resultado = {
         "xgb_model": xgb_model,
         "feature_cols": feature_cols,
@@ -438,7 +444,7 @@ def entrenar_modelo_xgboost(
 def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-
+    t0 = time.time()
     print(f"Cargando muestra de {N_CUSTOMERS} clientes...")
     df_customers, df_products, df_transactions = preprocess.load_complete_dataset_filtered_number_customers(
         N_CUSTOMERS, random_state=RANDOM_STATE
@@ -487,7 +493,7 @@ def main():
         df_train, eval_users, actual, article_to_category, actual_categories_test, categorias_compradas_general,
         k_eval=K_EVAL, extra_params=extra_params_datos,
     )
-
+    to_cluster = time.time()
     print("Entrenando modelo de clustering...")
     resultado_cluster = entrenar_modelo_cluster(
         df_customers, df_products, df_train, eval_users, actual,
@@ -495,7 +501,7 @@ def main():
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
         extra_params=extra_params_datos,
     )
-
+    print(f"Entrenamiento de clustering: {to_cluster - t0:.2f}s")
     print("Entrenando modelo XGBoost...")
     resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,

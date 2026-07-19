@@ -11,6 +11,7 @@ import xgboost as xgb
 from utils.preprocess import auto_optimize_categories, imputar_nulos_tfm
 import os 
 import json
+import time
 
 CATEGORICAL_FEATURES_CLUSTER = [
     'product_group_name',
@@ -331,7 +332,7 @@ def get_customer_profile(customer_id, df_transactions, X_df):
     if len(bought_valid) == 0:
         return pd.DataFrame()
     
-    print("Customer profile: ", X_df.loc[bought_valid].mean(axis=0).to_frame().T)
+    #print("Customer profile: ", X_df.loc[bought_valid].mean(axis=0).to_frame().T)
 
     return X_df.loc[bought_valid].mean(axis=0).to_frame().T
 
@@ -387,7 +388,7 @@ def generar_negativos_cliente(
 ):
     
     comprados = compras_por_cliente.get(cliente, set())
-
+    articulos_usados = comprados.copy() #para eviatar duplicados (muy improbable, pero por si acaso)
     n_necesarios = len(positivos_cliente) * n_negativos_por_positivo
     n_generados = 0
     intentos = 0
@@ -400,19 +401,19 @@ def generar_negativos_cliente(
             todos_los_articulos,
             size=batch_size,
             p=prob_muestreo,
-            replace=False
+            replace=True
         )
 
         intentos += len(candidatos)
 
         for c in candidatos:
-            if c not in comprados:
+            if c not in articulos_usados:
                 negativos.append({
                     "customer_id": cliente,
                     "article_id": c,
                     "label": 0,
                 })
-
+                articulos_usados.add(c)
                 n_generados += 1
 
                 if n_generados >= n_necesarios:
@@ -521,6 +522,7 @@ def get_or_train_bpr(df_transactions, bpr_params, cache_dir="model_cache"):
         random_state=current_config["random_state"]
     )
     
+    os.makedirs(cache_dir,exist_ok = True)
     # 4. Guardamos las nuevas matrices y el nuevo archivo de control
     user_factors_df.to_parquet(user_factors_path)
     item_factors_df.to_parquet(item_factors_path)
@@ -543,7 +545,7 @@ def xgboost_preprocess(
     # 2. Muestras positivas: pares únicos (cliente, artículo) realmente comprados
     positivos = df_transactions[['customer_id', 'article_id']].drop_duplicates().copy()
     positivos['label'] = 1
-    
+    t0_bpr = time.time()
     # 3. Usamos el modelo BPR antes de generar negativos por si lo usamos alli
     bpr_params = {
         "factors": bpr_factors,
@@ -551,11 +553,17 @@ def xgboost_preprocess(
         "regularization": bpr_regularization,
         "random_state": random_state
     }
+    print(f"Tiempo BPR: {time.time() - t0_bpr:.2f}s")
     # 3a Llamamos a nuestra función 'inteligente' con caché en lugar de train_bpr_model
     #si ya está entrenado, usamos el cache
-    user_factors_df, item_factors_df = get_or_train_bpr(df_transactions, bpr_params)
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    # Definimos la carpeta de caché dentro de backend/
+    CACHE_DIR = os.path.join(BASE_DIR, "bpr_cache")
+    user_factors_df, item_factors_df = get_or_train_bpr(df_transactions, bpr_params,cache_dir=CACHE_DIR)
     # 4. Negative sampling ponderado por popularidad (artículos más vendidos
     #    tienen más probabilidad de ser muestreados como negativos — más realista)
+    print('Generando negativos...')
+    t0_neg = time.time()
     todos_los_articulos = article_df['article_id'].values
     popularidad = (
         article_df.set_index('article_id')['sales_volume']
@@ -583,7 +591,7 @@ def xgboost_preprocess(
     negativos = pd.DataFrame(negativos_rows)
 
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
-
+    print(f"Tiempo generación de negativos: {time.time() - t0_neg:.2f}s")
     # 3b. Señal colaborativa (BPR): "quién compró qué", independiente de los
     #     atributos de producto. Se añade como una feature más (bpr_score) =
     #     producto escalar entre el vector latente del cliente y el del
