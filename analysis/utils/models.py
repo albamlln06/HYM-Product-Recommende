@@ -9,6 +9,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from implicit.bpr import BayesianPersonalizedRanking
 import xgboost as xgb
 from utils.preprocess import auto_optimize_categories, imputar_nulos_tfm
+import os 
+import json
 
 CATEGORICAL_FEATURES_CLUSTER = [
     'product_group_name',
@@ -468,6 +470,65 @@ def bpr_dot_scores(ids, id_factors_df, other_vector):
     matrix = id_factors_df.reindex(ids).fillna(0.0).to_numpy()
     return matrix @ other_vector
 
+def get_or_train_bpr(df_transactions, bpr_params, cache_dir="model_cache"):
+    """
+    Controlador de caché para el modelo BPR. 
+    Comprueba si los parámetros o los datos han cambiado antes de reentrenar.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    config_path = os.path.join(cache_dir, "bpr_config.json")
+    user_factors_path = os.path.join(cache_dir, "user_factors.parquet")
+    item_factors_path = os.path.join(cache_dir, "item_factors.parquet")
+    
+    # 1. Definir el estado actual (Parámetros + Huella dactilar de los datos)
+    current_config = {
+        # Parámetros del modelo
+        "factors": bpr_params.get("factors", 32),
+        "iterations": bpr_params.get("iterations", 15),
+        "learning_rate": bpr_params.get("learning_rate", 0.05),
+        "regularization": bpr_params.get("regularization", 0.01),
+        "random_state": bpr_params.get("random_state", 42),
+        
+        # Huella dactilar de los datos (detecta si cambia el train_set)
+        "num_transactions": len(df_transactions),
+        "num_unique_users": df_transactions['customer_id'].nunique(),
+        "num_unique_items": df_transactions['article_id'].nunique()
+    }
+    
+    # 2. Comprobar si existe caché y si la configuración es idéntica
+    if os.path.exists(config_path) and os.path.exists(user_factors_path) and os.path.exists(item_factors_path):
+        with open(config_path, "r") as f:
+            cached_config = json.load(f)
+            
+        if cached_config == current_config:
+            print("✅ BPR Cache: Parámetros y datos intactos. Cargando matrices desde disco...")
+            user_factors_df = pd.read_parquet(user_factors_path)
+            item_factors_df = pd.read_parquet(item_factors_path)
+            return user_factors_df, item_factors_df
+        else:
+            print("⚠️ BPR Cache: Detectados cambios en datos o parámetros. Reentrenando...")
+    else:
+        print("🔍 BPR Cache: No se encontró caché. Entrenando desde cero...")
+        
+    # 3. Si no hay caché válida, entrenamos
+    user_factors_df, item_factors_df = train_bpr_model(
+        df_transactions, 
+        factors=current_config["factors"],
+        iterations=current_config["iterations"],
+        learning_rate=current_config["learning_rate"],
+        regularization=current_config["regularization"],
+        random_state=current_config["random_state"]
+    )
+    
+    # 4. Guardamos las nuevas matrices y el nuevo archivo de control
+    user_factors_df.to_parquet(user_factors_path)
+    item_factors_df.to_parquet(item_factors_path)
+    
+    with open(config_path, "w") as f:
+        json.dump(current_config, f, indent=4)
+        
+    return user_factors_df, item_factors_df
 
 def xgboost_preprocess(
     df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
@@ -482,8 +543,18 @@ def xgboost_preprocess(
     # 2. Muestras positivas: pares únicos (cliente, artículo) realmente comprados
     positivos = df_transactions[['customer_id', 'article_id']].drop_duplicates().copy()
     positivos['label'] = 1
-
-    # 3. Negative sampling ponderado por popularidad (artículos más vendidos
+    
+    # 3. Usamos el modelo BPR antes de generar negativos por si lo usamos alli
+    bpr_params = {
+        "factors": bpr_factors,
+        "iterations": bpr_iterations,
+        "regularization": bpr_regularization,
+        "random_state": random_state
+    }
+    # 3a Llamamos a nuestra función 'inteligente' con caché en lugar de train_bpr_model
+    #si ya está entrenado, usamos el cache
+    user_factors_df, item_factors_df = get_or_train_bpr(df_transactions, bpr_params)
+    # 4. Negative sampling ponderado por popularidad (artículos más vendidos
     #    tienen más probabilidad de ser muestreados como negativos — más realista)
     todos_los_articulos = article_df['article_id'].values
     popularidad = (
@@ -517,10 +588,7 @@ def xgboost_preprocess(
     #     atributos de producto. Se añade como una feature más (bpr_score) =
     #     producto escalar entre el vector latente del cliente y el del
     #     artículo, vectorizado para todo el dataset a la vez.
-    user_factors_df, item_factors_df = train_bpr_model(
-        df_transactions, factors=bpr_factors, iterations=bpr_iterations,
-        regularization=bpr_regularization, random_state=random_state,
-    )
+    
     user_matrix = user_factors_df.reindex(dataset['customer_id']).fillna(0.0).to_numpy()
     item_matrix = item_factors_df.reindex(dataset['article_id']).fillna(0.0).to_numpy()
     dataset['bpr_score'] = (user_matrix * item_matrix).sum(axis=1)

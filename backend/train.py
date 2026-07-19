@@ -399,7 +399,6 @@ def entrenar_modelo_xgboost(
             user_vector = user_factors_df.reindex([u]).fillna(0.0).to_numpy()[0]
             bpr_scores = models.bpr_dot_scores(candidate_pool_u["article_id"], item_factors_df, user_vector)
             candidate_pool_u = candidate_pool_u.assign(bpr_score=bpr_scores)
-
             user_row = user_encoded_indexed.loc[[u]]
             recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_pool_u, feature_cols, top_n=k_eval)
             predicciones.append(recs["article_id"].tolist())
