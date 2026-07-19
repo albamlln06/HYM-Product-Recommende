@@ -383,7 +383,7 @@ def entrenar_modelo_xgboost(
             .to_dict()
         )
         candidate_genero = candidate_pool["article_id"].map(article_to_gender)
-
+        print('Iniciando de predicciones')
         predicciones = []
         for u in eval_users:
             if u not in user_encoded_indexed.index:
