@@ -594,22 +594,156 @@ def generar_candidatos_bpr_batch(clientes, user_factors_df, item_factors_df, com
                        
     return pd.DataFrame(resultados)
 
-def generar_candidatos_populares(df_train, top_k=100):
+def generar_candidatos_cluster(clientes, compras_por_cliente, df_articles, df_train, top_k=100):
     """
-    Calcula los artículos más vendidos en el último mes disponible en el set de datos.
-    Se asume que df_train tiene columnas 'article_id' y 't_dat'.
+    Genera candidatos de artículos proporcionalmente a los clústers históricos del usuario.
+    Devuelve estrictamente un DataFrame con ['customer_id', 'article_id'].
     """
+    # 1. Calcular popularidad dentro de cada clúster
+    ventas_cluster = df_train[['article_id']].merge(
+        df_articles[['article_id', 'cluster']], on='article_id', how='inner'
+    )
+    populares_cluster = ventas_cluster.groupby(['cluster', 'article_id']).size().reset_index(name='ventas')
+    top_por_cluster = populares_cluster.sort_values(['cluster', 'ventas'], ascending=[True, False])
+
+    # 2. Diccionarios de acceso rápido
+    items_por_cluster_dict = top_por_cluster.groupby('cluster')['article_id'].apply(list).to_dict()
+    item_to_cluster = dict(zip(df_articles['article_id'], df_articles['cluster']))
+
+    resultados = []
+
+    for cliente in clientes:
+        comprados = compras_por_cliente.get(cliente, set())
+        
+        if not comprados:
+            continue
+            
+        clusters_comprados = [item_to_cluster[item] for item in comprados if item in item_to_cluster]
+        
+        if not clusters_comprados:
+            continue
+            
+        freq_clusters = pd.Series(clusters_comprados).value_counts(normalize=True)
+        cupos_por_cluster = (freq_clusters * top_k).round().astype(int)
+        
+        candidatos_usuario = []
+        for cluster, cupo in cupos_por_cluster.items():
+            if cupo <= 0: continue
+            
+            candidatos_potenciales = items_por_cluster_dict.get(cluster, [])
+            candidatos_validos = [item for item in candidatos_potenciales if item not in comprados]
+            
+            candidatos_usuario.extend(candidatos_validos[:cupo])
+            
+        # Solo guardamos el par usuario-artículo
+        for art_id in candidatos_usuario:
+            resultados.append({
+                "customer_id": cliente,
+                "article_id": art_id
+            })
+
+    return pd.DataFrame(resultados)
+
+def construir_o_cargar_covisitacion(df_train, cache_dir="backend/bpr_cache", max_pairs_per_item=100):
+    """
+    Construye una matriz de co-visitación: ¿Qué se compra junto con qué?
+    La guarda en caché para no repetir el cruce pesado.
+    """
+    cache_path = os.path.join(cache_dir, "covisitation_matrix.parquet")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    if os.path.exists(cache_path):
+        print("Cargando matriz de co-visitación desde caché...")
+        return pd.read_parquet(cache_path)
+
+    print("Calculando matriz de co-visitación (esto puede tardar la primera vez)...")
     
-    # 1. Filtrar el último mes disponible (usando la fecha máxima del dataset)
-    fecha_max = df_train['t_dat'].max()
-    fecha_inicio_mes = fecha_max - pd.Timedelta(days=30)
+    # Nos quedamos solo con compras únicas por cliente (si compró el mismo 2 veces, cuenta como 1)
+    df_unique = df_train[['customer_id', 'article_id']].drop_duplicates()
     
-    df_reciente = df_train[df_train['t_dat'] >= fecha_inicio_mes]
+    # MERGE MÁGICO: Cruzamos la tabla consigo misma por cliente
+    # Esto genera todas las combinaciones de pares (Item A, Item B) que un cliente ha comprado
+    df_pairs = df_unique.merge(df_unique, on='customer_id', suffixes=('_A', '_B'))
     
-    # 3. Contar artículos (el método más rápido en Pandas)
-    top_articulos = df_reciente['article_id'].value_counts().head(top_k).index.tolist()
+    # Quitamos cuando Item A == Item B
+    df_pairs = df_pairs[df_pairs['article_id_A'] != df_pairs['article_id_B']]
     
-    return top_articulos
+    # Contamos cuántas veces ocurre cada par
+    co_counts = df_pairs.groupby(['article_id_A', 'article_id_B']).size().reset_index(name='co_purchases')
+    
+    # Para no hacer un archivo gigante, nos quedamos solo con los Top N compañeros de cada artículo
+    co_counts = co_counts.sort_values(['article_id_A', 'co_purchases'], ascending=[True, False])
+    top_covisitation = co_counts.groupby('article_id_A').head(max_pairs_per_item)
+    
+    top_covisitation.to_parquet(cache_path, index=False)
+    return top_covisitation
+
+def generar_candidatos_covisitacion(clientes, df_train, top_k=20, ultimas_n_compras=3, decay_factor=0.7, umbral_log=50):
+    """
+    Genera candidatos basándose en co-visitación.
+    - Mantiene duplicados en el historial.
+    - Usa pesos dinámicos de recencia (decay_factor ** i).
+    - Aplica log-normalización (np.log1p) SOLO si el máximo de co-compras supera el umbral_log.
+    """
+    df_covisitation = construir_o_cargar_covisitacion(df_train)
+    
+    # --- CONTROL ADAPTATIVO DE NORMALIZACIÓN ---
+    max_co_purchases = df_covisitation['co_purchases'].max()
+    usar_log = max_co_purchases > umbral_log
+    
+    # Si quieres dejar rastro de qué decisión tomó (útil para debug):
+    # print(f"Max co-purchases: {max_co_purchases}. Usando normalización logarítmica: {usar_log}")
+    
+    cov_dict = (
+        df_covisitation
+        .groupby("article_id_A")
+        .apply(lambda x: list(zip(x["article_id_B"], x["co_purchases"])))
+        .to_dict()
+    )
+    
+    # Ordenar historial de compras (más recientes primero)
+    df_train_sorted = df_train.sort_values(['customer_id', 't_dat'], ascending=[True, False])
+    
+    ultimas_compras_dict = (
+        df_train_sorted
+        .groupby('customer_id')['article_id']
+        .apply(lambda x: x.tolist()[:ultimas_n_compras])
+        .to_dict()
+    )
+
+    resultados = []
+
+    for cliente in clientes:
+        ultimas_compras = ultimas_compras_dict.get(cliente, [])
+        set_comprados = set(ultimas_compras) 
+        
+        if not ultimas_compras:
+            continue
+            
+        scores_candidatos = {}
+        
+        for i, item_comprado in enumerate(ultimas_compras):
+            peso = decay_factor ** i
+            
+            for compañero, raw_score in cov_dict.get(item_comprado, []):
+                if compañero not in set_comprados:
+                    
+                    # --- APLICACIÓN DEL CONTROL ---
+                    score_base = np.log1p(raw_score) if usar_log else raw_score
+                    
+                    scores_candidatos[compañero] = scores_candidatos.get(compañero, 0) + (score_base * peso)
+                    
+        top_candidatos = sorted(scores_candidatos.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        
+        for art_id, score in top_candidatos:
+            resultados.append({
+                "customer_id": cliente,
+                "article_id": art_id,
+                "covisitation_score": score
+            })
+
+    return pd.DataFrame(resultados)
+
 
 def xgboost_preprocess(
     df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
@@ -682,7 +816,7 @@ def xgboost_preprocess(
 
     # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
     user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df)
-
+    
     # 5. Join final: dataset × features de usuario × features de artículo
     dataset = (
         dataset

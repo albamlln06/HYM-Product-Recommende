@@ -369,7 +369,6 @@ def entrenar_modelo_xgboost(
         user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df)
         candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
         user_encoded_indexed = user_encoded.set_index("customer_id")
-
         # Si un cliente solo ha comprado artículos de un único género
         # (index_group_name: Ladieswear/Menswear/Baby-Children/Divided/Sport),
         # se le acotan las recomendaciones a ese género. Si ha comprado de
