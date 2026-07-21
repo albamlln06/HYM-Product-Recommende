@@ -68,6 +68,16 @@ train_transactions = pd.read_parquet(MODELS_DIR / "train_transactions.parquet")
 bpr_user_factors = pd.read_parquet(MODELS_DIR / "bpr_user_factors.parquet").set_index("customer_id")
 bpr_item_factors = pd.read_parquet(MODELS_DIR / "bpr_item_factors.parquet").set_index("article_id")
 
+# Diccionario de co-visitación: mismo caché que construye/actualiza train.py
+# (ver models.construir_o_cargar_covisitacion, con huella de datos/parámetros
+# para auto-invalidarse). Si aún no existe (no se ha reentrenado con
+# covisitación activada), se sirve sin esta feature en vez de fallar.
+_covisitation_cache_path = Path(__file__).resolve().parent / "bpr_cache" / "covisitation_matrix.parquet"
+cov_dict = (
+    models.construir_diccionario_covisitacion(pd.read_parquet(_covisitation_cache_path))
+    if _covisitation_cache_path.exists() else None
+)
+
 cluster_X_final = np.load(MODELS_DIR / "cluster_X_final.npy")
 cluster_article_ids = np.load(MODELS_DIR / "cluster_article_ids.npy")
 X_df = pd.DataFrame(cluster_X_final, index=cluster_article_ids)
@@ -215,8 +225,10 @@ def get_customer_recommendations(customer_id: str):
     )
     cluster_recs = article_cards(cluster_recs_df["article_id"].tolist() if not cluster_recs_df.empty else [])
 
-    generos_cliente = set(history_tx["article_id"].map(article_to_gender).dropna())
+    bought_ids = history_tx["article_id"].tolist()
     candidate_pool_cliente = candidate_articles
+
+    generos_cliente = set(history_tx["article_id"].map(article_to_gender).dropna())
     if len(generos_cliente) == 1:
         genero_cliente = next(iter(generos_cliente))
         pool_filtrado = candidate_articles[candidate_articles_genero == genero_cliente]
@@ -229,6 +241,9 @@ def get_customer_recommendations(customer_id: str):
     user_bpr_vector = bpr_user_factors.reindex([customer_id]).fillna(0.0).to_numpy()[0]
     bpr_scores = models.bpr_dot_scores(candidate_pool_cliente["article_id"], bpr_item_factors, user_bpr_vector)
     candidate_pool_cliente = candidate_pool_cliente.assign(bpr_score=bpr_scores)
+
+    if cov_dict is not None:
+        candidate_pool_cliente = models.assign_covisitation_score(candidate_pool_cliente, bought_ids, cov_dict)
 
     user_row = customers_xgb_indexed.loc[[customer_id]]
     xgb_recs_df = models.recommend_xgboost_for_user(
@@ -368,8 +383,12 @@ def get_profile_recommendations(customer_id: str):
         for p in profile["purchases"]
     ])
 
-    generos_cliente = set(synthetic_tx["article_id"].map(article_to_gender).dropna())
+    # Más recientes primero, para que el decaimiento de covisitación pese
+    # las compras según su orden real (ver assign_covisitation_score).
+    bought_ids = [p["article_id"] for p in reversed(profile["purchases"])]
     candidate_pool_cliente = candidate_articles
+
+    generos_cliente = set(synthetic_tx["article_id"].map(article_to_gender).dropna())
     if len(generos_cliente) == 1:
         genero_cliente = next(iter(generos_cliente))
         pool_filtrado = candidate_articles[candidate_articles_genero == genero_cliente]
@@ -379,6 +398,9 @@ def get_profile_recommendations(customer_id: str):
     user_bpr_vector = bpr_user_factors.reindex([customer_id]).fillna(0.0).to_numpy()[0]
     bpr_scores = models.bpr_dot_scores(candidate_pool_cliente["article_id"], bpr_item_factors, user_bpr_vector)
     candidate_pool_cliente = candidate_pool_cliente.assign(bpr_score=bpr_scores)
+
+    if cov_dict is not None:
+        candidate_pool_cliente = models.assign_covisitation_score(candidate_pool_cliente, bought_ids, cov_dict)
 
     user_row = build_synthetic_user_row(customer_id, profile, synthetic_tx)
     xgb_recs_df = models.recommend_xgboost_for_user(

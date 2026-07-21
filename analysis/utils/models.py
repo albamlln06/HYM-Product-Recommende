@@ -245,29 +245,10 @@ def compute_cross_features(dataset, historial_dict=None, cov_dict=None,cov_decay
             dataset['section_name'].astype(str) == dataset['user_favorite_section'].astype(str)
         ).astype('int8')
     # 4. CO-VISITATION SCORE (Relación basada en historial)
-    if False: #la apagamos por ahora
-        if historial_dict is not None and cov_dict is not None:
-            print("Calculando cross-feature de co-visitación...")
-            scores = []
-            
-            # zip() permite iterar ambas columnas a velocidad de C
-            for cliente, candidato in zip(dataset['customer_id'], dataset['article_id']):
-                historial = historial_dict.get(cliente, [])
-                
-                if not historial:
-                    scores.append(0.0)
-                else:
-                    # Utilizamos la función modular definida previamente
-                    score = calcular_covisitation_score(
-                        historial_usuario=historial,
-                        articulo_candidato=candidato,
-                        cov_dict=cov_dict,
-                        decay_factor=cov_decay,
-                        usar_log=usar_log
-                    )
-                    scores.append(score)
-                
-        dataset['covisitation_score'] = scores
+    if historial_dict is not None and cov_dict is not None:
+        dataset['covisitation_score'] = covisitation_scores_batch(
+            dataset, historial_dict, cov_dict, decay_factor=cov_decay, usar_log=usar_log,
+        )
 
     return dataset
 
@@ -716,11 +697,30 @@ def construir_o_cargar_covisitacion(
     """
 
     cache_path = os.path.join(cache_dir, "covisitation_matrix.parquet")
+    config_path = os.path.join(cache_dir, "covisitation_config.json")
     os.makedirs(cache_dir, exist_ok=True)
 
-    if os.path.exists(cache_path):
-        print("Cargando matriz de co-visitation...")
-        return pd.read_parquet(cache_path)
+    # Huella de parámetros + datos (mismo patrón que get_or_train_bpr): si
+    # cambia cualquiera de estos, la caché queda invalidada automáticamente.
+    current_config = {
+        "max_pairs_per_item": max_pairs_per_item,
+        "min_co_purchases": min_co_purchases,
+        "num_transactions": len(df_train),
+        "num_unique_customers": df_train["customer_id"].nunique(),
+        "num_unique_articles": df_train["article_id"].nunique(),
+    }
+
+    if os.path.exists(cache_path) and os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            cached_config = json.load(f)
+
+        if cached_config == current_config:
+            print("✅ Covisitación Cache: Parámetros y datos intactos. Cargando desde disco...")
+            return pd.read_parquet(cache_path)
+        else:
+            print("⚠️ Covisitación Cache: Detectados cambios en datos o parámetros. Reconstruyendo...")
+    else:
+        print("🔍 Covisitación Cache: No se encontró caché. Construyendo desde cero...")
 
     print("Construyendo matriz de co-visitation...")
 
@@ -773,6 +773,8 @@ def construir_o_cargar_covisitacion(
     )
 
     top_covisitation.to_parquet(cache_path, index=False)
+    with open(config_path, "w") as f:
+        json.dump(current_config, f, indent=4)
 
     return top_covisitation
 
@@ -839,9 +841,78 @@ def calcular_covisitation_score(
 
     return score
 
+
+def covisitation_score_dict(historial, cov_dict, decay_factor=0.7, usar_log=False):
+    """
+    Diccionario {article_id candidato: score} para UN historial de usuario
+    (lista de article_id, más reciente primero), sumando con decaimiento por
+    recencia los vecinos de co-visitación de cada artículo del historial.
+
+    Es el núcleo que comparten covisitation_scores_batch (entrenamiento, un
+    dataset con muchas filas por cliente) y assign_covisitation_score (servido
+    en vivo, un único usuario por petición) — para no repetir la misma lógica
+    en dos sitios.
+    """
+    score_dict = {}
+    for i, articulo_historial in enumerate(historial):
+        peso = decay_factor ** i
+        for vecino, co_purchases in cov_dict.get(articulo_historial, {}).items():
+            valor = np.log1p(co_purchases) if usar_log else co_purchases
+            score_dict[vecino] = score_dict.get(vecino, 0.0) + peso * valor
+    return score_dict
+
+
+def covisitation_scores_batch(dataset, historial_dict, cov_dict, decay_factor=0.7, usar_log=False):
+    """
+    Versión vectorizada de calcular_covisitation_score para un dataset entero.
+
+    calcular_covisitation_score recorre el historial completo del cliente por
+    cada FILA (customer_id, article_id) del dataset — con varias filas por
+    cliente (positivos + negativos en entrenamiento), repite la misma suma
+    ponderada una y otra vez para el mismo cliente. Aquí se agrupa por
+    customer_id único: para cada cliente se construye una sola vez su
+    diccionario {article_id candidato: score} (covisitation_score_dict), y
+    luego se aplica a todas sus filas con un simple .map().
+
+    Devuelve una Series alineada con el índice de `dataset`, lista para
+    asignar como dataset['covisitation_score'].
+    """
+    resultado = pd.Series(0.0, index=dataset.index)
+
+    for cliente, filas in dataset.groupby('customer_id').groups.items():
+        historial = historial_dict.get(cliente, [])
+        if not historial:
+            continue
+
+        score_dict = covisitation_score_dict(historial, cov_dict, decay_factor, usar_log)
+        if not score_dict:
+            continue
+
+        articulos = dataset.loc[filas, 'article_id']
+        resultado.loc[filas] = articulos.map(score_dict).fillna(0.0)
+
+    return resultado
+
+
+def assign_covisitation_score(candidate_df, historial, cov_dict, decay_factor=0.7, usar_log=False):
+    """
+    Añade la columna 'covisitation_score' a candidate_df para UN usuario cuyo
+    historial de compras (lista de article_id, más reciente primero) se pasa
+    directamente. Pensada para el servido en vivo / bucle de evaluación (un
+    usuario a la vez) — para un dataset con muchas filas por cliente conviene
+    covisitation_scores_batch en su lugar.
+    """
+    if not historial:
+        return candidate_df.assign(covisitation_score=0.0)
+    score_dict = covisitation_score_dict(historial, cov_dict, decay_factor, usar_log)
+    return candidate_df.assign(
+        covisitation_score=candidate_df["article_id"].map(score_dict).fillna(0.0)
+    )
+
 def xgboost_preprocess(
     df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
+    historial_dict=None, cov_dict=None,
 ):
     rng = np.random.default_rng(random_state)
 
@@ -921,7 +992,7 @@ def xgboost_preprocess(
     #     puramente aritméticas sobre columnas ya presentes, sin depender de
     #     si ese artículo en concreto se compró (a diferencia de un flag de
     #     recompra, esto no se filtra con el label y no tiene fuga de datos).
-    dataset = compute_cross_features(dataset)
+    dataset = compute_cross_features(dataset, historial_dict=historial_dict, cov_dict=cov_dict)
     # La imputación de categóricas (p.ej. club_member_status -> 'GUEST') ya se
     # hizo en encode_xgboost_categoricals, antes del cast a 'category' (un
     # fillna posterior sobre una columna category rompe si el valor no es ya

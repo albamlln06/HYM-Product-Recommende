@@ -287,6 +287,7 @@ def entrenar_modelo_xgboost(
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
     k_eval=12, random_state=42,
     run_name="xgboost", extra_params=None,
+    historial_dict=None, cov_dict=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
@@ -320,6 +321,8 @@ def entrenar_modelo_xgboost(
             "bpr_factors": bpr_factors,
             "bpr_iterations": bpr_iterations,
             "bpr_regularization": bpr_regularization,
+            # Runs sin esto no tenían la feature covisitation_score.
+            "covisitation_activa": historial_dict is not None and cov_dict is not None,
         }
         if extra_params:
             params.update(extra_params)
@@ -330,6 +333,7 @@ def entrenar_modelo_xgboost(
             df_customers, df_products, df_train,
             n_negativos_por_positivo=n_negativos_por_positivo, random_state=random_state,
             bpr_factors=bpr_factors, bpr_iterations=bpr_iterations, bpr_regularization=bpr_regularization,
+            historial_dict=historial_dict, cov_dict=cov_dict,
         )
         feature_cols = list(X.columns)
         
@@ -381,11 +385,21 @@ def entrenar_modelo_xgboost(
             .apply(set)
             .to_dict()
         )
-        candidate_genero = candidate_pool["article_id"].map(article_to_gender)
+        compras_por_cliente = df_train.groupby("customer_id")["article_id"].apply(set).to_dict()
+
+        # NOTA sobre generar_candidatos_bpr_batch / generar_candidatos_cluster:
+        # se probó a usarlas como preselección dura (acotar candidate_pool a
+        # los top_k de cada una antes de puntuar con XGBoost) para acelerar
+        # este bucle. Medido con este mismo dataset: el artículo realmente
+        # comprado en el hold-out está en el candidate_pool completo (50.000)
+        # el 90.8% de las veces, pero en la preselección BPR+cluster (~400)
+        # solo el 6.0% — y subir top_k a 20.000 (40% del catálogo) solo llega
+        # al 47.4%. BPR es demasiado débil en este tamaño de muestra (ver nota
+        # en BPR_ITERATIONS más arriba) para usarlo como filtro de recall, así
+        # que se descartó: dispara el MAP@12 a la baja (de ~0.011 a ~0.0008 en
+        # la prueba). Se mantiene el candidate_pool completo aquí; el ahorro
+        # de tiempo real vino de la co-visitación vectorizada, no de esto.
         print('Iniciando de predicciones')
-        #Hay que aplicar estrategias: Los que tengan mayor ranking bpr, los más vendidos del último mes, más populares en general, recompras
-        #artículos dentro del cluster de los que compraron, etc
-        #Por ahora esta creada la bpr
         predicciones = []
         for u in eval_users:
             if u not in user_encoded_indexed.index:
@@ -396,17 +410,25 @@ def entrenar_modelo_xgboost(
             generos_usuario = generos_por_usuario.get(u, set())
             if len(generos_usuario) == 1:
                 genero_usuario = next(iter(generos_usuario))
-                pool_filtrado = candidate_pool[candidate_genero == genero_usuario]
+                candidate_genero_u = candidate_pool_u["article_id"].map(article_to_gender)
+                pool_filtrado = candidate_pool_u[candidate_genero_u == genero_usuario]
                 if not pool_filtrado.empty:
                     candidate_pool_u = pool_filtrado
 
             # bpr_score es una feature CRUZADA (depende del usuario Y del
             # artículo), así que no se puede precalcular una vez en
             # candidate_pool como el resto de columnas: se recalcula para
-            # cada usuario contra su propio candidate_pool_u (vectorizado).
+            # cada usuario contra su propio candidate_pool_u (vectorizado),
+            # ahora sobre un candidate_pool_u mucho más pequeño.
             user_vector = user_factors_df.reindex([u]).fillna(0.0).to_numpy()[0]
             bpr_scores = models.bpr_dot_scores(candidate_pool_u["article_id"], item_factors_df, user_vector)
             candidate_pool_u = candidate_pool_u.assign(bpr_score=bpr_scores)
+
+            if historial_dict is not None and cov_dict is not None:
+                candidate_pool_u = models.assign_covisitation_score(
+                    candidate_pool_u, historial_dict.get(u, []), cov_dict,
+                )
+
             user_row = user_encoded_indexed.loc[[u]]
             recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_pool_u, feature_cols, top_n=k_eval)
             predicciones.append(recs["article_id"].tolist())
@@ -526,6 +548,7 @@ def main():
         n_negativos_por_positivo=N_NEGATIVOS_POR_POSITIVO, candidate_pool_size=CANDIDATE_POOL_SIZE,
         bpr_factors=BPR_FACTORS, bpr_iterations=BPR_ITERATIONS, bpr_regularization=BPR_REGULARIZATION,
         k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,
+        historial_dict=historial_dict, cov_dict=cov_dict,
     )
 
     # --- Métricas ---
