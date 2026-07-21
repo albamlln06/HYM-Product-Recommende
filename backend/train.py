@@ -442,6 +442,67 @@ def entrenar_modelo_xgboost(
     }
     return resultado
 
+#Función de generación de candidatos global
+def generar_candidatos_hibridos(
+    clientes, 
+    user_factors_df, item_factors_df, compras_por_cliente,  # Para BPR
+    df_articles, df_train,                                  # Para Clústers y Populares
+    historial_dict, cov_dict,                               # Para Co-visitación
+    top_k_bpr=100, 
+    top_k_cluster=30, 
+    top_k_cov=20, 
+    top_k_pop=20
+):
+    """
+    Ejecuta todas las estrategias de generación de candidatos y las fusiona 
+    eliminando duplicados.
+    """
+    print(f"Generando candidatos para {len(clientes)} usuarios...")
+    
+    # 1. BPR (Colaborativo Latente)
+    print(" -> Ejecutando BPR...")
+    df_bpr = models.generar_candidatos_bpr_batch(
+        clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=top_k_bpr
+    )
+    # Conservamos solo IDs para la unión limpia
+    df_bpr_clean = df_bpr[['customer_id', 'article_id']].copy()
+    
+    # 2. Clusters (Afinidad por segmento)
+    print(" -> Ejecutando Cluster Matching...")
+    df_cluster = models.generar_candidatos_cluster(
+        clientes, compras_por_cliente, df_articles, df_train, top_k=top_k_cluster
+    )
+    
+    # 3. Co-visitación (Complementarios de carrito)
+    print(" -> Ejecutando Co-visitación...")
+    df_cov = models.generar_candidatos_covisitacion(
+        clientes, historial_dict, cov_dict, top_k=top_k_cov, usar_log=True
+    )
+    
+    # 4. Populares (Cold-Start / Tendencias)
+    print(" -> Ejecutando Populares...")
+    df_pop = models.generar_candidatos_populares(clientes, df_articles, top_k=top_k_pop)
+    
+    # --- UNIÓN DE TODOS LOS CANDIDATOS ---
+    print(" -> Fusionando y eliminando duplicados...")
+    df_hibrido = pd.concat([df_bpr_clean, df_cluster, df_cov, df_pop], ignore_index=True)
+    
+    # Quitamos duplicados. Si un artículo lo sugirió BPR y Co-visitación, nos quedamos con una fila.
+    df_hibrido = df_hibrido.drop_duplicates(subset=['customer_id', 'article_id'])
+    
+    # --- RECUPERAR EL SCORE DE BPR (Opcional, muy recomendado) ---
+    # Como tu función BPR calculó un score, lo pegamos aquí usando merge. 
+    # Los artículos que vienen de otras fuentes tendrán NaN, los rellenamos con 0.
+    df_hibrido = df_hibrido.merge(
+        df_bpr[['customer_id', 'article_id', 'bpr_score']], 
+        on=['customer_id', 'article_id'], 
+        how='left'
+    )
+    df_hibrido['bpr_score'] = df_hibrido['bpr_score'].fillna(0.0)
+    
+    print(f"¡Hecho! Total de candidatos únicos generados: {len(df_hibrido)}")
+    
+    return df_hibrido
 
 def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
