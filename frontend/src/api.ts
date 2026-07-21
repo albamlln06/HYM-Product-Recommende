@@ -69,7 +69,7 @@ export interface ProfileRecommendations {
   customer_id: string;
   personalized: boolean;
   historial: ArticleCard[];
-  recomendaciones_cluster?: ArticleCard[];
+  recomendaciones_xgboost?: ArticleCard[];
   recomendaciones_populares?: ArticleCard[];
 }
 
@@ -108,7 +108,7 @@ export function getMlflowRuns(): Promise<MlflowRunsResponse> {
   return fetchJson("/api/mlflow/runs");
 }
 
-export function searchArticles(query: string, limit = 60): Promise<ArticleCard[]> {
+export function searchArticles(query: string, limit = 200): Promise<ArticleCard[]> {
   const params = new URLSearchParams();
   if (query) params.set("query", query);
   params.set("limit", String(limit));

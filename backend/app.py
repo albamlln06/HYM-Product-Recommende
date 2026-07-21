@@ -247,7 +247,7 @@ def get_customer_recommendations(customer_id: str):
 
 
 @app.get("/api/articles")
-def search_articles(query: str = "", limit: int = 60):
+def search_articles(query: str = "", limit: int = 200):
     matches = article_display
     if query:
         q = query.lower()
@@ -299,15 +299,52 @@ def reset_profile(customer_id: str):
     return profile_summary(profile)
 
 
+def build_synthetic_user_row(customer_id: str, profile: dict, synthetic_tx: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye el 'user_row' de 1 fila que espera recommend_xgboost_for_user
+    para un perfil simulado (sin entrada en customers_xgb_features.parquet).
+
+    Reutiliza compute_user_features tal cual (mismas agregaciones que en
+    entrenamiento), pero las dos columnas categóricas (club_member_status,
+    user_favorite_section) hay que recodificarlas a mano con las MISMAS
+    categorías vistas en entrenamiento: XGBoost trata las categóricas nativas
+    por su código entero, así que si aquí se generara un dtype 'category'
+    con un conjunto de categorías distinto (p.ej. una sola fila -> una sola
+    categoría), los códigos no significarían lo mismo que en el modelo
+    entrenado y las predicciones saldrían mal.
+    """
+    one_row_customers = pd.DataFrame([{
+        "customer_id": customer_id,
+        "age": profile["age"],
+        "club_member_status": profile["club_member_status"],
+    }])
+    user_df = models.compute_user_features(one_row_customers, synthetic_tx, article_features)
+    row = user_df.iloc[[0]].copy()
+
+    club_categories = customers_xgb_features["club_member_status"].cat.categories
+    club_value = row["club_member_status"].iloc[0]
+    if club_value not in club_categories:
+        club_value = club_categories[0]
+    row["club_member_status"] = pd.Categorical([club_value], categories=club_categories)
+
+    section_categories = customers_xgb_features["user_favorite_section"].cat.categories
+    section_value = row["user_favorite_section"].iloc[0] if "user_favorite_section" in row else None
+    if section_value not in section_categories:
+        section_value = None
+    row["user_favorite_section"] = pd.Categorical([section_value], categories=section_categories)
+
+    return row
+
+
 @app.get("/api/profile/{customer_id}/recommendations")
 def get_profile_recommendations(customer_id: str):
     """
-    Recomendaciones para perfiles simulados (carrito de la tienda), sin
-    historial real de entrenamiento. Solo Cluster (funciona a partir de
-    compras crudas) + Popular como fallback: el modelo XGBoost actual
-    depende de columnas categóricas nativas y de un bpr_score calculado
-    sobre clientes reales de la muestra, no es seguro reproducirlo aquí
-    para un customer_id que no existe en esos artefactos.
+    Recomendaciones para perfiles simulados (carrito de la tienda). Replica
+    el mismo pipeline que get_customer_recommendations (filtro de género +
+    bpr_score + XGBoost), construyendo un user_row equivalente al vuelo ya
+    que este customer_id no existe en customers_xgb_features.parquet ni en
+    bpr_user_factors (el bpr_score sale 0.0 por cold-start, igual que haría
+    reindex().fillna(0.0) con cualquier cliente fuera de la muestra).
     """
     profile = get_profile_or_404(customer_id)
 
@@ -331,14 +368,27 @@ def get_profile_recommendations(customer_id: str):
         for p in profile["purchases"]
     ])
 
-    cluster_recs_df = models.recommend_by_cluster_similarity(
-        customer_id, synthetic_tx, article_features, X_df, top_n=TOP_N,
+    generos_cliente = set(synthetic_tx["article_id"].map(article_to_gender).dropna())
+    candidate_pool_cliente = candidate_articles
+    if len(generos_cliente) == 1:
+        genero_cliente = next(iter(generos_cliente))
+        pool_filtrado = candidate_articles[candidate_articles_genero == genero_cliente]
+        if not pool_filtrado.empty:
+            candidate_pool_cliente = pool_filtrado
+
+    user_bpr_vector = bpr_user_factors.reindex([customer_id]).fillna(0.0).to_numpy()[0]
+    bpr_scores = models.bpr_dot_scores(candidate_pool_cliente["article_id"], bpr_item_factors, user_bpr_vector)
+    candidate_pool_cliente = candidate_pool_cliente.assign(bpr_score=bpr_scores)
+
+    user_row = build_synthetic_user_row(customer_id, profile, synthetic_tx)
+    xgb_recs_df = models.recommend_xgboost_for_user(
+        xgb_model, user_row, candidate_pool_cliente, feature_cols, top_n=TOP_N,
     )
-    cluster_recs = article_cards(cluster_recs_df["article_id"].tolist() if not cluster_recs_df.empty else [])
+    xgb_recs = article_cards(xgb_recs_df["article_id"].tolist())
 
     return {
         "customer_id": customer_id,
         "personalized": True,
         "historial": article_cards([p["article_id"] for p in profile["purchases"]]),
-        "recomendaciones_cluster": cluster_recs,
+        "recomendaciones_xgboost": xgb_recs,
     }

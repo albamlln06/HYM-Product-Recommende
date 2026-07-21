@@ -49,7 +49,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
   const [recommendations, setRecommendations] = useState<ProfileRecommendations | null>(null);
 
   useEffect(() => {
-    searchArticles("", 60).then((articles) => {
+    searchArticles("", 200).then((articles) => {
       const cats = [...new Set(articles.map((a) => a.category))].sort();
       setAllCategories(cats);
     });
@@ -57,7 +57,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
 
   useEffect(() => {
     const handle = setTimeout(() => {
-      searchArticles(query, 60).then(setCatalog).catch(() => setCatalog([]));
+      searchArticles(query, 200).then(setCatalog).catch(() => setCatalog([]));
     }, 250);
     return () => clearTimeout(handle);
   }, [query]);
@@ -105,6 +105,20 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
     setCart((prev) => prev.filter((line) => line.article.article_id !== articleId));
   };
 
+  const PROFILE_NOT_FOUND = "Perfil no encontrado";
+
+  // El perfil vive solo en memoria del backend: si el proceso se reinicia,
+  // el customer_id guardado en localStorage deja de existir ahí (404).
+  const handleStaleProfileError = (err: unknown): string => {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === PROFILE_NOT_FOUND) {
+      setProfile(null);
+      localStorage.removeItem(PROFILE_KEY);
+      return "Tu sesión anterior ya no existe (el servidor se reinició). Introduce tus datos de nuevo y vuelve a intentarlo.";
+    }
+    return message;
+  };
+
   const ensureProfile = async (): Promise<Profile> => {
     if (profile) return profile;
     if (!displayName.trim()) {
@@ -135,7 +149,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
       const recs = await getProfileRecommendations(currentProfile.customer_id);
       setRecommendations(recs);
     } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : String(err));
+      setCheckoutError(handleStaleProfileError(err));
     } finally {
       setCheckoutLoading(false);
     }
@@ -149,7 +163,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
       const recs = await getProfileRecommendations(currentProfile.customer_id);
       setRecommendations(recs);
     } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : String(err));
+      setCheckoutError(handleStaleProfileError(err));
     } finally {
       setCheckoutLoading(false);
     }
@@ -204,7 +218,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
                     : "Aún no tienes compras: aquí tienes los artículos más vendidos."}
                 </p>
                 {recommendations.personalized ? (
-                  <ProductList title="Recomendado para ti" articles={recommendations.recomendaciones_cluster ?? []} />
+                  <ProductList title="Recomendado para ti (XGBoost)" articles={recommendations.recomendaciones_xgboost ?? []} />
                 ) : (
                   <ProductList title="Más vendidos" articles={recommendations.recomendaciones_populares ?? []} />
                 )}
