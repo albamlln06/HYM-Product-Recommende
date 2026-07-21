@@ -459,6 +459,20 @@ def main():
     df_train, df_test, eval_users, actual = leave_one_out_split(df_transactions, n_test=N_TEST_PURCHASES)
     print(f"Usuarios de evaluación: {len(eval_users):,}  |  train: {len(df_train):,}  |  test: {len(df_test):,}")
 
+    historial_dict = models.generar_historial_dict(df_train) #historial para luego generar el score de co-visitación
+    # 2.2 Matriz de Co-visitación (busca en caché primero)
+    df_cov = models.construir_o_cargar_covisitacion(
+    df_train, 
+    cache_dir="backend/bpr_cache", 
+    max_pairs_per_item=100
+    )
+    # 2.3 Conversión a diccionario anidado O(1) para máxima velocidad
+    cov_dict = models.construir_diccionario_covisitacion(df_cov)
+    # (Opcional) Ya puedes liberar la memoria del DataFrame de co-visitación
+    del df_cov
+    import gc; gc.collect()
+    #Con esto ya podemos calcular el score de co-visitación para usarlo como feature, generar negativos o candidatos.
+
     # Info de categoría (product_group_name) para medir, además de MAP@12, si
     # cada modelo acierta al menos la categoría del producto (más laxo que el
     # SKU exacto): contra lo que el usuario compró en el hold-out y contra

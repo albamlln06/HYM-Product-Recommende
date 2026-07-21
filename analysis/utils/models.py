@@ -268,6 +268,7 @@ def compute_cross_features(dataset, historial_dict=None, cov_dict=None,cov_decay
                     scores.append(score)
                 
         dataset['covisitation_score'] = scores
+
     return dataset
 
 def generar_historial_dict(df_train, n_recientes=None):
@@ -327,6 +328,7 @@ def find_optimal_k(X_final, k_range=range(2, 15)):
 
     plt.tight_layout()
     plt.show()
+
 
 
 def fit_product_clustering(X_final, K, article_ids):
