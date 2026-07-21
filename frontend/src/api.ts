@@ -29,6 +29,9 @@ export interface ArticleCard {
   product_group_name: string;
   section_name: string;
   avg_price: number;
+  product_code: number;
+  colour: string;
+  category: string;
 }
 
 export interface CustomerRecommendations {
@@ -67,7 +70,6 @@ export interface ProfileRecommendations {
   personalized: boolean;
   historial: ArticleCard[];
   recomendaciones_cluster?: ArticleCard[];
-  recomendaciones_xgboost?: ArticleCard[];
   recomendaciones_populares?: ArticleCard[];
 }
 
@@ -106,7 +108,7 @@ export function getMlflowRuns(): Promise<MlflowRunsResponse> {
   return fetchJson("/api/mlflow/runs");
 }
 
-export function searchArticles(query: string, limit = 30): Promise<ArticleCard[]> {
+export function searchArticles(query: string, limit = 60): Promise<ArticleCard[]> {
   const params = new URLSearchParams();
   if (query) params.set("query", query);
   params.set("limit", String(limit));

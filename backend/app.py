@@ -6,6 +6,7 @@ en el entrenamiento.
 """
 import json
 import sys
+import uuid
 from pathlib import Path
 
 import joblib
@@ -15,6 +16,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from mlflow.exceptions import MlflowException
+from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
@@ -47,7 +49,7 @@ app = FastAPI(title="Panel de recomendación de productos")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -81,6 +83,7 @@ candidate_articles_genero = candidate_articles["article_id"].map(article_to_gend
 article_display_cols = [
     "article_id", "prod_name", "product_type_name", "product_group_name",
     "section_name", "avg_price", "cluster",
+    "product_code", "perceived_colour_master_name", "index_group_name",
 ]
 article_display = article_features[article_display_cols].set_index("article_id")
 
@@ -99,8 +102,44 @@ def article_cards(article_ids):
             "product_group_name": row["product_group_name"],
             "section_name": row["section_name"],
             "avg_price": round(float(row["avg_price"]), 4),
+            "product_code": int(row["product_code"]),
+            "colour": row["perceived_colour_master_name"],
+            "category": row["index_group_name"],
         })
     return cards
+
+
+# --- Perfiles simulados (login sin contraseña + carrito/compras en vivo) ---
+# En memoria del proceso: se pierden al reiniciar el backend, no hay BD nueva.
+simulated_profiles: dict[str, dict] = {}
+VALID_CLUB_STATUSES = {"ACTIVE", "PRE-CREATE", "LEFT CLUB"}
+
+
+class ProfileCreate(BaseModel):
+    display_name: str
+    age: float | None = None
+    club_member_status: str | None = None
+
+
+class PurchaseCreate(BaseModel):
+    article_id: int
+
+
+def get_profile_or_404(customer_id: str) -> dict:
+    profile = simulated_profiles.get(customer_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Perfil no encontrado")
+    return profile
+
+
+def profile_summary(profile: dict) -> dict:
+    return {
+        "customer_id": profile["customer_id"],
+        "display_name": profile["display_name"],
+        "age": profile["age"],
+        "club_member_status": profile["club_member_status"],
+        "historial": article_cards([p["article_id"] for p in profile["purchases"]]),
+    }
 
 
 @app.get("/api/metrics")
@@ -204,4 +243,102 @@ def get_customer_recommendations(customer_id: str):
         "historial": history,
         "recomendaciones_cluster": cluster_recs,
         "recomendaciones_xgboost": xgb_recs,
+    }
+
+
+@app.get("/api/articles")
+def search_articles(query: str = "", limit: int = 60):
+    matches = article_display
+    if query:
+        q = query.lower()
+        mask = (
+            matches["prod_name"].str.lower().str.contains(q)
+            | matches["product_type_name"].str.lower().str.contains(q)
+            | matches["product_group_name"].str.lower().str.contains(q)
+        )
+        matches = matches[mask]
+    return article_cards(matches.head(limit).index.tolist())
+
+
+@app.post("/api/profile")
+def create_profile(payload: ProfileCreate):
+    if not payload.display_name.strip():
+        raise HTTPException(status_code=422, detail="El nombre no puede estar vacío")
+    club_member_status = payload.club_member_status if payload.club_member_status in VALID_CLUB_STATUSES else "ACTIVE"
+    age = payload.age if payload.age is not None else float(customers_indexed["age"].median())
+    customer_id = f"sim_{uuid.uuid4().hex[:12]}"
+    simulated_profiles[customer_id] = {
+        "customer_id": customer_id,
+        "display_name": payload.display_name.strip(),
+        "age": age,
+        "club_member_status": club_member_status,
+        "purchases": [],
+    }
+    return profile_summary(simulated_profiles[customer_id])
+
+
+@app.post("/api/profile/{customer_id}/purchases")
+def add_purchase(customer_id: str, payload: PurchaseCreate):
+    profile = get_profile_or_404(customer_id)
+    if payload.article_id not in article_display.index:
+        raise HTTPException(status_code=404, detail="Artículo no encontrado en el catálogo")
+    price = float(article_display.loc[payload.article_id, "avg_price"])
+    profile["purchases"].append({
+        "article_id": payload.article_id,
+        "t_dat": pd.Timestamp.now(),
+        "price": price,
+        "is_online": 1,
+    })
+    return profile_summary(profile)
+
+
+@app.post("/api/profile/{customer_id}/reset")
+def reset_profile(customer_id: str):
+    profile = get_profile_or_404(customer_id)
+    profile["purchases"] = []
+    return profile_summary(profile)
+
+
+@app.get("/api/profile/{customer_id}/recommendations")
+def get_profile_recommendations(customer_id: str):
+    """
+    Recomendaciones para perfiles simulados (carrito de la tienda), sin
+    historial real de entrenamiento. Solo Cluster (funciona a partir de
+    compras crudas) + Popular como fallback: el modelo XGBoost actual
+    depende de columnas categóricas nativas y de un bpr_score calculado
+    sobre clientes reales de la muestra, no es seguro reproducirlo aquí
+    para un customer_id que no existe en esos artefactos.
+    """
+    profile = get_profile_or_404(customer_id)
+
+    if not profile["purchases"]:
+        popular_ids = models.predict_popular(train_transactions, [customer_id], k=TOP_N)[0]
+        return {
+            "customer_id": customer_id,
+            "personalized": False,
+            "historial": [],
+            "recomendaciones_populares": article_cards(popular_ids),
+        }
+
+    synthetic_tx = pd.DataFrame([
+        {
+            "customer_id": customer_id,
+            "article_id": p["article_id"],
+            "t_dat": p["t_dat"],
+            "price": p["price"],
+            "is_online": p["is_online"],
+        }
+        for p in profile["purchases"]
+    ])
+
+    cluster_recs_df = models.recommend_by_cluster_similarity(
+        customer_id, synthetic_tx, article_features, X_df, top_n=TOP_N,
+    )
+    cluster_recs = article_cards(cluster_recs_df["article_id"].tolist() if not cluster_recs_df.empty else [])
+
+    return {
+        "customer_id": customer_id,
+        "personalized": True,
+        "historial": article_cards([p["article_id"] for p in profile["purchases"]]),
+        "recomendaciones_cluster": cluster_recs,
     }
