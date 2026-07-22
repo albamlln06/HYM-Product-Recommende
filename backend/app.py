@@ -6,6 +6,7 @@ en el entrenamiento.
 """
 import json
 import sys
+import uuid
 from pathlib import Path
 
 import joblib
@@ -15,6 +16,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from mlflow.exceptions import MlflowException
+from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
@@ -47,7 +49,7 @@ app = FastAPI(title="Panel de recomendación de productos")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -66,6 +68,16 @@ train_transactions = pd.read_parquet(MODELS_DIR / "train_transactions.parquet")
 bpr_user_factors = pd.read_parquet(MODELS_DIR / "bpr_user_factors.parquet").set_index("customer_id")
 bpr_item_factors = pd.read_parquet(MODELS_DIR / "bpr_item_factors.parquet").set_index("article_id")
 
+# Diccionario de co-visitación: mismo caché que construye/actualiza train.py
+# (ver models.construir_o_cargar_covisitacion, con huella de datos/parámetros
+# para auto-invalidarse). Si aún no existe (no se ha reentrenado con
+# covisitación activada), se sirve sin esta feature en vez de fallar.
+_covisitation_cache_path = Path(__file__).resolve().parent / "bpr_cache" / "covisitation_matrix.parquet"
+cov_dict = (
+    models.construir_diccionario_covisitacion(pd.read_parquet(_covisitation_cache_path))
+    if _covisitation_cache_path.exists() else None
+)
+
 cluster_X_final = np.load(MODELS_DIR / "cluster_X_final.npy")
 cluster_article_ids = np.load(MODELS_DIR / "cluster_article_ids.npy")
 X_df = pd.DataFrame(cluster_X_final, index=cluster_article_ids)
@@ -81,6 +93,7 @@ candidate_articles_genero = candidate_articles["article_id"].map(article_to_gend
 article_display_cols = [
     "article_id", "prod_name", "product_type_name", "product_group_name",
     "section_name", "avg_price", "cluster",
+    "product_code", "perceived_colour_master_name", "index_group_name",
 ]
 article_display = article_features[article_display_cols].set_index("article_id")
 
@@ -99,8 +112,44 @@ def article_cards(article_ids):
             "product_group_name": row["product_group_name"],
             "section_name": row["section_name"],
             "avg_price": round(float(row["avg_price"]), 4),
+            "product_code": int(row["product_code"]),
+            "colour": row["perceived_colour_master_name"],
+            "category": row["index_group_name"],
         })
     return cards
+
+
+# --- Perfiles simulados (login sin contraseña + carrito/compras en vivo) ---
+# En memoria del proceso: se pierden al reiniciar el backend, no hay BD nueva.
+simulated_profiles: dict[str, dict] = {}
+VALID_CLUB_STATUSES = {"ACTIVE", "PRE-CREATE", "LEFT CLUB"}
+
+
+class ProfileCreate(BaseModel):
+    display_name: str
+    age: float | None = None
+    club_member_status: str | None = None
+
+
+class PurchaseCreate(BaseModel):
+    article_id: int
+
+
+def get_profile_or_404(customer_id: str) -> dict:
+    profile = simulated_profiles.get(customer_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Perfil no encontrado")
+    return profile
+
+
+def profile_summary(profile: dict) -> dict:
+    return {
+        "customer_id": profile["customer_id"],
+        "display_name": profile["display_name"],
+        "age": profile["age"],
+        "club_member_status": profile["club_member_status"],
+        "historial": article_cards([p["article_id"] for p in profile["purchases"]]),
+    }
 
 
 @app.get("/api/metrics")
@@ -176,8 +225,10 @@ def get_customer_recommendations(customer_id: str):
     )
     cluster_recs = article_cards(cluster_recs_df["article_id"].tolist() if not cluster_recs_df.empty else [])
 
-    generos_cliente = set(history_tx["article_id"].map(article_to_gender).dropna())
+    bought_ids = history_tx["article_id"].tolist()
     candidate_pool_cliente = candidate_articles
+
+    generos_cliente = set(history_tx["article_id"].map(article_to_gender).dropna())
     if len(generos_cliente) == 1:
         genero_cliente = next(iter(generos_cliente))
         pool_filtrado = candidate_articles[candidate_articles_genero == genero_cliente]
@@ -191,6 +242,9 @@ def get_customer_recommendations(customer_id: str):
     bpr_scores = models.bpr_dot_scores(candidate_pool_cliente["article_id"], bpr_item_factors, user_bpr_vector)
     candidate_pool_cliente = candidate_pool_cliente.assign(bpr_score=bpr_scores)
 
+    if cov_dict is not None:
+        candidate_pool_cliente = models.assign_covisitation_score(candidate_pool_cliente, bought_ids, cov_dict)
+
     user_row = customers_xgb_indexed.loc[[customer_id]]
     xgb_recs_df = models.recommend_xgboost_for_user(
         xgb_model, user_row, candidate_pool_cliente, feature_cols, top_n=TOP_N,
@@ -203,5 +257,160 @@ def get_customer_recommendations(customer_id: str):
         "seccion_favorita": customers_indexed.loc[customer_id, "user_favorite_section"],
         "historial": history,
         "recomendaciones_cluster": cluster_recs,
+        "recomendaciones_xgboost": xgb_recs,
+    }
+
+
+@app.get("/api/articles")
+def search_articles(query: str = "", limit: int = 200):
+    matches = article_display
+    if query:
+        q = query.lower()
+        mask = (
+            matches["prod_name"].str.lower().str.contains(q)
+            | matches["product_type_name"].str.lower().str.contains(q)
+            | matches["product_group_name"].str.lower().str.contains(q)
+        )
+        matches = matches[mask]
+    return article_cards(matches.head(limit).index.tolist())
+
+
+@app.post("/api/profile")
+def create_profile(payload: ProfileCreate):
+    if not payload.display_name.strip():
+        raise HTTPException(status_code=422, detail="El nombre no puede estar vacío")
+    club_member_status = payload.club_member_status if payload.club_member_status in VALID_CLUB_STATUSES else "ACTIVE"
+    age = payload.age if payload.age is not None else float(customers_indexed["age"].median())
+    customer_id = f"sim_{uuid.uuid4().hex[:12]}"
+    simulated_profiles[customer_id] = {
+        "customer_id": customer_id,
+        "display_name": payload.display_name.strip(),
+        "age": age,
+        "club_member_status": club_member_status,
+        "purchases": [],
+    }
+    return profile_summary(simulated_profiles[customer_id])
+
+
+@app.post("/api/profile/{customer_id}/purchases")
+def add_purchase(customer_id: str, payload: PurchaseCreate):
+    profile = get_profile_or_404(customer_id)
+    if payload.article_id not in article_display.index:
+        raise HTTPException(status_code=404, detail="Artículo no encontrado en el catálogo")
+    price = float(article_display.loc[payload.article_id, "avg_price"])
+    profile["purchases"].append({
+        "article_id": payload.article_id,
+        "t_dat": pd.Timestamp.now(),
+        "price": price,
+        "is_online": 1,
+    })
+    return profile_summary(profile)
+
+
+@app.post("/api/profile/{customer_id}/reset")
+def reset_profile(customer_id: str):
+    profile = get_profile_or_404(customer_id)
+    profile["purchases"] = []
+    return profile_summary(profile)
+
+
+def build_synthetic_user_row(customer_id: str, profile: dict, synthetic_tx: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye el 'user_row' de 1 fila que espera recommend_xgboost_for_user
+    para un perfil simulado (sin entrada en customers_xgb_features.parquet).
+
+    Reutiliza compute_user_features tal cual (mismas agregaciones que en
+    entrenamiento), pero las dos columnas categóricas (club_member_status,
+    user_favorite_section) hay que recodificarlas a mano con las MISMAS
+    categorías vistas en entrenamiento: XGBoost trata las categóricas nativas
+    por su código entero, así que si aquí se generara un dtype 'category'
+    con un conjunto de categorías distinto (p.ej. una sola fila -> una sola
+    categoría), los códigos no significarían lo mismo que en el modelo
+    entrenado y las predicciones saldrían mal.
+    """
+    one_row_customers = pd.DataFrame([{
+        "customer_id": customer_id,
+        "age": profile["age"],
+        "club_member_status": profile["club_member_status"],
+    }])
+    user_df = models.compute_user_features(one_row_customers, synthetic_tx, article_features)
+    row = user_df.iloc[[0]].copy()
+
+    club_categories = customers_xgb_features["club_member_status"].cat.categories
+    club_value = row["club_member_status"].iloc[0]
+    if club_value not in club_categories:
+        club_value = club_categories[0]
+    row["club_member_status"] = pd.Categorical([club_value], categories=club_categories)
+
+    section_categories = customers_xgb_features["user_favorite_section"].cat.categories
+    section_value = row["user_favorite_section"].iloc[0] if "user_favorite_section" in row else None
+    if section_value not in section_categories:
+        section_value = None
+    row["user_favorite_section"] = pd.Categorical([section_value], categories=section_categories)
+
+    return row
+
+
+@app.get("/api/profile/{customer_id}/recommendations")
+def get_profile_recommendations(customer_id: str):
+    """
+    Recomendaciones para perfiles simulados (carrito de la tienda). Replica
+    el mismo pipeline que get_customer_recommendations (filtro de género +
+    bpr_score + XGBoost), construyendo un user_row equivalente al vuelo ya
+    que este customer_id no existe en customers_xgb_features.parquet ni en
+    bpr_user_factors (el bpr_score sale 0.0 por cold-start, igual que haría
+    reindex().fillna(0.0) con cualquier cliente fuera de la muestra).
+    """
+    profile = get_profile_or_404(customer_id)
+
+    if not profile["purchases"]:
+        popular_ids = models.predict_popular(train_transactions, [customer_id], k=TOP_N)[0]
+        return {
+            "customer_id": customer_id,
+            "personalized": False,
+            "historial": [],
+            "recomendaciones_populares": article_cards(popular_ids),
+        }
+
+    synthetic_tx = pd.DataFrame([
+        {
+            "customer_id": customer_id,
+            "article_id": p["article_id"],
+            "t_dat": p["t_dat"],
+            "price": p["price"],
+            "is_online": p["is_online"],
+        }
+        for p in profile["purchases"]
+    ])
+
+    # Más recientes primero, para que el decaimiento de covisitación pese
+    # las compras según su orden real (ver assign_covisitation_score).
+    bought_ids = [p["article_id"] for p in reversed(profile["purchases"])]
+    candidate_pool_cliente = candidate_articles
+
+    generos_cliente = set(synthetic_tx["article_id"].map(article_to_gender).dropna())
+    if len(generos_cliente) == 1:
+        genero_cliente = next(iter(generos_cliente))
+        pool_filtrado = candidate_articles[candidate_articles_genero == genero_cliente]
+        if not pool_filtrado.empty:
+            candidate_pool_cliente = pool_filtrado
+
+    user_bpr_vector = bpr_user_factors.reindex([customer_id]).fillna(0.0).to_numpy()[0]
+    bpr_scores = models.bpr_dot_scores(candidate_pool_cliente["article_id"], bpr_item_factors, user_bpr_vector)
+    candidate_pool_cliente = candidate_pool_cliente.assign(bpr_score=bpr_scores)
+
+    if cov_dict is not None:
+        candidate_pool_cliente = models.assign_covisitation_score(candidate_pool_cliente, bought_ids, cov_dict)
+
+    user_row = build_synthetic_user_row(customer_id, profile, synthetic_tx)
+    xgb_recs_df = models.recommend_xgboost_for_user(
+        xgb_model, user_row, candidate_pool_cliente, feature_cols, top_n=TOP_N,
+    )
+    xgb_recs = article_cards(xgb_recs_df["article_id"].tolist())
+
+    return {
+        "customer_id": customer_id,
+        "personalized": True,
+        "historial": article_cards([p["article_id"] for p in profile["purchases"]]),
         "recomendaciones_xgboost": xgb_recs,
     }
