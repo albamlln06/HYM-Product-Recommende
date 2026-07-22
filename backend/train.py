@@ -287,6 +287,7 @@ def entrenar_modelo_xgboost(
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
     k_eval=12, random_state=42,
     run_name="xgboost", extra_params=None,
+    historial_dict=None, cov_dict=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
@@ -330,6 +331,7 @@ def entrenar_modelo_xgboost(
             df_customers, df_products, df_train,
             n_negativos_por_positivo=n_negativos_por_positivo, random_state=random_state,
             bpr_factors=bpr_factors, bpr_iterations=bpr_iterations, bpr_regularization=bpr_regularization,
+            historial_dict=historial_dict, cov_dict=cov_dict,
         )
         feature_cols = list(X.columns)
         
@@ -407,6 +409,12 @@ def entrenar_modelo_xgboost(
             user_vector = user_factors_df.reindex([u]).fillna(0.0).to_numpy()[0]
             bpr_scores = models.bpr_dot_scores(candidate_pool_u["article_id"], item_factors_df, user_vector)
             candidate_pool_u = candidate_pool_u.assign(bpr_score=bpr_scores)
+
+            if historial_dict is not None and cov_dict is not None:
+                candidate_pool_u = models.assign_covisitation_score(
+                    candidate_pool_u, historial_dict.get(u, []), cov_dict,
+                )
+
             user_row = user_encoded_indexed.loc[[u]]
             recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_pool_u, feature_cols, top_n=k_eval)
             predicciones.append(recs["article_id"].tolist())
@@ -587,6 +595,7 @@ def main():
         n_negativos_por_positivo=N_NEGATIVOS_POR_POSITIVO, candidate_pool_size=CANDIDATE_POOL_SIZE,
         bpr_factors=BPR_FACTORS, bpr_iterations=BPR_ITERATIONS, bpr_regularization=BPR_REGULARIZATION,
         k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,
+        historial_dict=historial_dict, cov_dict=cov_dict,
     )
 
     # --- Métricas ---
