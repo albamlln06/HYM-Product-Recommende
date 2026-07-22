@@ -283,11 +283,14 @@ def entrenar_modelo_xgboost(
     df_customers, df_products, df_train, eval_users, actual,
     article_to_category, actual_categories_test, categorias_compradas_general,
     n_estimators=300, max_depth=6, learning_rate=0.05,
+    reg_lambda=1.0, reg_alpha=0.0, subsample=1.0, colsample_bytree=1.0,
+    min_child_weight=1, gamma=0.0, early_stopping_rounds=30,
     n_negativos_por_positivo=8, candidate_pool_size=120000,
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
     k_eval=12, random_state=42,
     run_name="xgboost", extra_params=None,
     historial_dict=None, cov_dict=None,
+    inference_batch_size=100,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
@@ -302,12 +305,37 @@ def entrenar_modelo_xgboost(
                   modelo BPR (matrix factorization colaborativa, ver
                   models.train_bpr_model) que aporta la feature bpr_score a
                   XGBoost.
+    reg_lambda, reg_alpha, subsample, colsample_bytree, min_child_weight,
+    gamma: hiperparámetros de regularización/muestreo estándar de XGBoost,
+                  expuestos aquí (con sus valores por defecto de XGBoost) para
+                  que optuna_search.py los pueda explorar sin tocar esta
+                  función.
+    early_stopping_rounds: corta el entrenamiento si el MAP de validación no
+                  mejora en N rondas, en vez de gastar las n_estimators
+                  completas siempre. Acelera tanto los runs normales como
+                  cada trial de Optuna.
+    inference_batch_size: nº de usuarios de evaluación que se agrupan en cada
+                  llamada a models.recommend_xgboost_batch. Antes se llamaba
+                  a model.predict una vez POR USUARIO (coste fijo de esa
+                  llamada multiplicado por nº de usuarios); agrupando en
+                  lotes se paga ese coste fijo una vez por lote en vez de una
+                  vez por usuario. Subirlo acelera la inferencia pero sube el
+                  pico de memoria (candidate_pool_size × inference_batch_size
+                  filas en memoria a la vez); bájalo si el proceso se queda
+                  sin memoria.
     """
     with mlflow.start_run(run_name=run_name):
         params = {
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
+            "reg_lambda": reg_lambda,
+            "reg_alpha": reg_alpha,
+            "subsample": subsample,
+            "colsample_bytree": colsample_bytree,
+            "min_child_weight": min_child_weight,
+            "gamma": gamma,
+            "early_stopping_rounds": early_stopping_rounds,
             "n_negativos_por_positivo": n_negativos_por_positivo,
             "candidate_pool_size": candidate_pool_size,
             "random_state": random_state,
@@ -355,11 +383,18 @@ def entrenar_modelo_xgboost(
             n_estimators=n_estimators,
             max_depth=max_depth,
             learning_rate=learning_rate,
+            reg_lambda=reg_lambda,
+            reg_alpha=reg_alpha,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            min_child_weight=min_child_weight,
+            gamma=gamma,
             objective="rank:map",
             eval_metric="map",
             random_state=random_state,
             enable_categorical=True,
             tree_method="hist",
+            early_stopping_rounds=early_stopping_rounds,
         )
         xgb_model.fit(
             X_train, y_train, qid=qid_train,
@@ -388,36 +423,13 @@ def entrenar_modelo_xgboost(
         #Hay que aplicar estrategias: Los que tengan mayor ranking bpr, los más vendidos del último mes, más populares en general, recompras
         #artículos dentro del cluster de los que compraron, etc
         #Por ahora esta creada la bpr
-        predicciones = []
-        for u in eval_users:
-            if u not in user_encoded_indexed.index:
-                predicciones.append([])
-                continue
-
-            candidate_pool_u = candidate_pool
-            generos_usuario = generos_por_usuario.get(u, set())
-            if len(generos_usuario) == 1:
-                genero_usuario = next(iter(generos_usuario))
-                pool_filtrado = candidate_pool[candidate_genero == genero_usuario]
-                if not pool_filtrado.empty:
-                    candidate_pool_u = pool_filtrado
-
-            # bpr_score es una feature CRUZADA (depende del usuario Y del
-            # artículo), así que no se puede precalcular una vez en
-            # candidate_pool como el resto de columnas: se recalcula para
-            # cada usuario contra su propio candidate_pool_u (vectorizado).
-            user_vector = user_factors_df.reindex([u]).fillna(0.0).to_numpy()[0]
-            bpr_scores = models.bpr_dot_scores(candidate_pool_u["article_id"], item_factors_df, user_vector)
-            candidate_pool_u = candidate_pool_u.assign(bpr_score=bpr_scores)
-
-            if historial_dict is not None and cov_dict is not None:
-                candidate_pool_u = models.assign_covisitation_score(
-                    candidate_pool_u, historial_dict.get(u, []), cov_dict,
-                )
-
-            user_row = user_encoded_indexed.loc[[u]]
-            recs = models.recommend_xgboost_for_user(xgb_model, user_row, candidate_pool_u, feature_cols, top_n=k_eval)
-            predicciones.append(recs["article_id"].tolist())
+        predicciones_dict = models.recommend_xgboost_batch(
+            xgb_model, eval_users, user_encoded_indexed, candidate_pool, candidate_genero,
+            generos_por_usuario, user_factors_df, item_factors_df, feature_cols,
+            historial_dict=historial_dict, cov_dict=cov_dict, top_n=k_eval,
+            batch_size=inference_batch_size,
+        )
+        predicciones = [predicciones_dict.get(u, []) for u in eval_users]
 
         map12 = models.mapk(actual, predicciones, k=k_eval)
         mlflow.log_metric("map12", map12)

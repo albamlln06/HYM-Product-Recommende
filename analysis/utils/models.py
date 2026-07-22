@@ -1135,6 +1135,71 @@ def recommend_xgboost_for_user(model, user_features, candidate_df, feature_cols,
     return ranked.head(top_n)[['article_id', 'score']].reset_index(drop=True)
 
 
+def recommend_xgboost_batch(
+    model, eval_users, user_encoded_indexed, candidate_pool, candidate_genero,
+    generos_por_usuario, user_factors_df, item_factors_df, feature_cols,
+    historial_dict=None, cov_dict=None, top_n=12, batch_size=100,
+):
+    """
+    Versión por lotes de recommend_xgboost_for_user, pensada para evaluar
+    (MAP@12) muchos usuarios a la vez en vez de uno por uno.
+
+    recommend_xgboost_for_user reconstruye el candidate pool y llama a
+    model.predict UNA VEZ POR USUARIO: el coste fijo de cada llamada
+    (concatenar el candidate pool, castear categóricas, construir la
+    entrada de XGBoost) se paga tantas veces como usuarios haya, aunque el
+    candidate pool y el modelo sean los mismos. Aquí se agrupan los usuarios
+    en lotes de `batch_size`: lo único que de verdad varía por usuario es el
+    filtro de género del candidate pool (candidate_genero), así que eso se
+    resuelve por usuario (barato, solo indexado booleano) y TODO lo demás
+    -- bpr_score, cross features (incluida co-visitación) y la llamada a
+    model.predict -- se calcula una sola vez para el lote entero, con el
+    mismo patrón vectorizado (producto escalar user x item, agrupación por
+    customer_id) que ya usa xgboost_preprocess/compute_cross_features en
+    entrenamiento.
+
+    Devuelve {customer_id: [article_id, ...]} (top_n por usuario), solo para
+    los usuarios presentes en user_encoded_indexed.
+    """
+    usuarios_validos = [u for u in eval_users if u in user_encoded_indexed.index]
+    resultados = {}
+
+    for inicio in range(0, len(usuarios_validos), batch_size):
+        lote = usuarios_validos[inicio:inicio + batch_size]
+
+        # Lo único que varía por usuario: qué candidatos le corresponden.
+        pares_por_usuario = []
+        for u in lote:
+            candidate_pool_u = candidate_pool
+            generos_usuario = generos_por_usuario.get(u, set())
+            if len(generos_usuario) == 1:
+                genero_usuario = next(iter(generos_usuario))
+                pool_filtrado = candidate_pool[candidate_genero == genero_usuario]
+                if not pool_filtrado.empty:
+                    candidate_pool_u = pool_filtrado
+            pares_por_usuario.append(candidate_pool_u.assign(customer_id=u))
+        lote_df = pd.concat(pares_por_usuario, ignore_index=True)
+
+        # A partir de aquí, todo vectorizado para el lote completo.
+        lote_df = lote_df.merge(
+            user_encoded_indexed.loc[lote].reset_index(), on="customer_id", how="left"
+        )
+        user_matrix = user_factors_df.reindex(lote_df["customer_id"]).fillna(0.0).to_numpy()
+        item_matrix = item_factors_df.reindex(lote_df["article_id"]).fillna(0.0).to_numpy()
+        lote_df["bpr_score"] = (user_matrix * item_matrix).sum(axis=1)
+        lote_df = compute_cross_features(lote_df, historial_dict=historial_dict, cov_dict=cov_dict)
+
+        X_infer = lote_df.reindex(columns=feature_cols)
+        num_cols = [c for c in feature_cols if not isinstance(X_infer[c].dtype, pd.CategoricalDtype)]
+        X_infer[num_cols] = X_infer[num_cols].fillna(0).astype(float)
+
+        lote_df["score"] = model.predict(X_infer)
+        for u, grupo in lote_df.groupby("customer_id", sort=False):
+            resultados[u] = grupo.nlargest(top_n, "score")["article_id"].tolist()
+
+    return resultados
+
+
 # ==========================================
 # MÉTRICAS DE EVALUACIÓN
 # ==========================================
