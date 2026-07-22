@@ -217,7 +217,7 @@ def compute_user_features(df_customers, df_transactions, df_products):
     user_df = user_df.merge(favorite_section, on="customer_id", how="left")
     return user_df
 
-def compute_cross_features(dataset):
+def compute_cross_features(dataset, historial_dict=None, cov_dict=None,cov_decay=0.7,usar_log=False):
     """
     Calcula variables que relacionan al cliente con el artículo específico.
     Se debe ejecutar DESPUÉS de hacer los merges de usuario y artículo.
@@ -244,9 +244,61 @@ def compute_cross_features(dataset):
         dataset['cross_is_favorite_section'] = (
             dataset['section_name'].astype(str) == dataset['user_favorite_section'].astype(str)
         ).astype('int8')
+    # 4. CO-VISITATION SCORE (Relación basada en historial)
+    if False: #la apagamos por ahora
+        if historial_dict is not None and cov_dict is not None:
+            print("Calculando cross-feature de co-visitación...")
+            scores = []
+            
+            # zip() permite iterar ambas columnas a velocidad de C
+            for cliente, candidato in zip(dataset['customer_id'], dataset['article_id']):
+                historial = historial_dict.get(cliente, [])
+                
+                if not historial:
+                    scores.append(0.0)
+                else:
+                    # Utilizamos la función modular definida previamente
+                    score = calcular_covisitation_score(
+                        historial_usuario=historial,
+                        articulo_candidato=candidato,
+                        cov_dict=cov_dict,
+                        decay_factor=cov_decay,
+                        usar_log=usar_log
+                    )
+                    scores.append(score)
+                
+        dataset['covisitation_score'] = scores
 
     return dataset
 
+def generar_historial_dict(df_train, n_recientes=None):
+    """
+    Genera un diccionario con el historial de compras por usuario.
+    
+    Parameters
+    ----------
+    df_train : DataFrame
+        Datos de entrenamiento con 'customer_id', 'article_id' y 't_dat'.
+    n_recientes : int, opcional
+        Si se especifica, toma solo los últimos 'n' artículos comprados.
+        Si es None o 0, utiliza todo el historial del usuario.
+    """
+    # Ordenar por cliente y fecha de manera descendente (lo más reciente primero)
+    df_sorted = df_train.sort_values(by=['customer_id', 't_dat'], ascending=[True, False])
+    
+    # Recortar a los n más recientes si se especifica
+    if n_recientes:
+        df_sorted = df_sorted.groupby('customer_id').head(n_recientes)
+        
+    # Agrupar y convertir a diccionario
+    historial_dict = (
+        df_sorted
+        .groupby('customer_id')['article_id']
+        .apply(list)
+        .to_dict()
+    )
+    
+    return historial_dict
 
 def find_optimal_k(X_final, k_range=range(2, 15)):
 
@@ -276,6 +328,7 @@ def find_optimal_k(X_final, k_range=range(2, 15)):
 
     plt.tight_layout()
     plt.show()
+
 
 
 def fit_product_clustering(X_final, K, article_ids):
@@ -532,6 +585,260 @@ def get_or_train_bpr(df_transactions, bpr_params, cache_dir="model_cache"):
         
     return user_factors_df, item_factors_df
 
+
+def generar_candidatos_bpr_batch(clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=100):
+    """
+    Genera los top_k candidatos BPR para una lista de clientes procesando en bloques (batches)
+    para maximizar la velocidad usando multiplicación de matrices pura.
+    """
+    batch_size=2048
+    item_ids = item_factors_df.index.to_numpy()
+    # Trasponemos la matriz de artículos para que la multiplicación sea directa: (B, K) @ (K, N) = (B, N)
+    item_matrix_T = item_factors_df.to_numpy().T 
+    
+    # Diccionario rápido para saber en qué columna quedó cada artículo
+    item_id_to_idx = {item_id: idx for idx, item_id in enumerate(item_ids)}
+    
+    resultados = []
+    
+    # Iterar sobre los clientes en bloques gigantes
+    for i in range(0, len(clientes), batch_size):
+        batch_clientes = clientes[i : i + batch_size]
+        
+        # Extraemos la sub-matriz de usuarios del bloque (Cold-start se rellena con 0)
+        user_batch_matrix = user_factors_df.reindex(batch_clientes).fillna(0.0).to_numpy()
+        
+        # MAGIA AQUÍ: Calculamos todos los scores del bloque de golpe
+        # scores_batch tendrá tamaño (tamaño_del_bloque, total_articulos_catalogo)
+        scores_batch = user_batch_matrix @ item_matrix_T
+        
+        # Procesar los resultados de cada usuario dentro del bloque
+        for j, cliente in enumerate(batch_clientes):
+            scores_usuario = scores_batch[j]
+            
+            # Penalizar comprados
+            comprados = compras_por_cliente.get(cliente, set())
+            if comprados:
+                indices_comprados = [item_id_to_idx[item] for item in comprados if item in item_id_to_idx]
+                scores_usuario[indices_comprados] = -np.inf
+            
+            # Extraer Top-K
+            if len(scores_usuario) > top_k:
+                # argpartition separa los Top K súper rápido (pero sin ordenarlos internamente)
+                top_k_indices = np.argpartition(scores_usuario, -top_k)[-top_k:]
+                # Ordenamos solo esos K mejores de mayor a menor score
+                top_k_indices = top_k_indices[np.argsort(-scores_usuario[top_k_indices])]
+            else:
+                top_k_indices = np.argsort(-scores_usuario)
+                
+            top_k_articulos = item_ids[top_k_indices]
+            top_k_scores = scores_usuario[top_k_indices]
+            
+            # Guardar resultados
+            for art_id, score in zip(top_k_articulos, top_k_scores):
+                resultados.append({
+                    "customer_id": cliente,
+                    "article_id": art_id,
+                    "bpr_score": score
+                })
+                       
+    return pd.DataFrame(resultados)
+
+def generar_candidatos_cluster(clientes, compras_por_cliente, df_articles, df_train, top_k=100):
+    """
+    Genera candidatos de artículos proporcionalmente a los clústers históricos del usuario.
+    Devuelve estrictamente un DataFrame con ['customer_id', 'article_id'].
+    """
+    # 1. Calcular popularidad dentro de cada clúster
+    ventas_cluster = df_train[['article_id']].merge(
+        df_articles[['article_id', 'cluster']], on='article_id', how='inner'
+    )
+    populares_cluster = ventas_cluster.groupby(['cluster', 'article_id']).size().reset_index(name='ventas')
+    top_por_cluster = populares_cluster.sort_values(['cluster', 'ventas'], ascending=[True, False])
+
+    # 2. Diccionarios de acceso rápido
+    items_por_cluster_dict = top_por_cluster.groupby('cluster')['article_id'].apply(list).to_dict()
+    item_to_cluster = dict(zip(df_articles['article_id'], df_articles['cluster']))
+
+    resultados = []
+
+    for cliente in clientes:
+        comprados = compras_por_cliente.get(cliente, set())
+        
+        if not comprados:
+            continue
+            
+        clusters_comprados = [item_to_cluster[item] for item in comprados if item in item_to_cluster]
+        
+        if not clusters_comprados:
+            continue
+            
+        freq_clusters = pd.Series(clusters_comprados).value_counts(normalize=True)
+        cupos_por_cluster = (freq_clusters * top_k).round().astype(int)
+        
+        candidatos_usuario = []
+        for cluster, cupo in cupos_por_cluster.items():
+            if cupo <= 0: continue
+            
+            candidatos_potenciales = items_por_cluster_dict.get(cluster, [])
+            candidatos_validos = [item for item in candidatos_potenciales if item not in comprados]
+            
+            candidatos_usuario.extend(candidatos_validos[:cupo])
+            
+        # Solo guardamos el par usuario-artículo
+        for art_id in candidatos_usuario:
+            resultados.append({
+                "customer_id": cliente,
+                "article_id": art_id
+            })
+
+    return pd.DataFrame(resultados)
+
+###FUNCIONES PARA COVISITACION
+def construir_o_cargar_covisitacion(
+    df_train,
+    cache_dir="backend/bpr_cache",
+    max_pairs_per_item=100,
+    min_co_purchases=1
+):
+    """
+    Construye (o carga desde caché) la matriz de co-visitación.
+
+    Dos artículos co-visitan si aparecen en el mismo transaction_id.
+
+    Parameters
+    ----------
+    max_pairs_per_item : int
+        Número máximo de vecinos que se conservan para cada artículo.
+
+    min_co_purchases : int
+        Número mínimo de compras conjuntas para conservar un par.
+    """
+
+    cache_path = os.path.join(cache_dir, "covisitation_matrix.parquet")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    if os.path.exists(cache_path):
+        print("Cargando matriz de co-visitation...")
+        return pd.read_parquet(cache_path)
+
+    print("Construyendo matriz de co-visitation...")
+
+    # Cada artículo solo cuenta una vez por ticket
+    df_unique = (
+        df_train[
+            ["transaction_id", "article_id"]
+        ]
+        .drop_duplicates()
+    )
+
+    # Todas las combinaciones de artículos dentro del mismo ticket
+    df_pairs = df_unique.merge(
+        df_unique,
+        on="transaction_id",
+        suffixes=("_A", "_B")
+    )
+
+    # Eliminar pares consigo mismos
+    df_pairs = df_pairs[
+        df_pairs.article_id_A != df_pairs.article_id_B
+    ]
+
+    # Número de veces que aparecen juntos
+    co_counts = (
+        df_pairs
+        .groupby(
+            ["article_id_A", "article_id_B"]
+        )
+        .size()
+        .reset_index(name="co_purchases")
+    )
+
+    # Eliminar relaciones muy débiles
+    co_counts = co_counts[
+        co_counts.co_purchases >= min_co_purchases
+    ]
+
+    # Ordenar por frecuencia
+    co_counts = co_counts.sort_values(
+        ["article_id_A", "co_purchases"],
+        ascending=[True, False]
+    )
+
+    # Conservar únicamente los mejores vecinos
+    top_covisitation = (
+        co_counts
+        .groupby("article_id_A")
+        .head(max_pairs_per_item)
+    )
+
+    top_covisitation.to_parquet(cache_path, index=False)
+
+    return top_covisitation
+
+def construir_diccionario_covisitacion(df_covisitation):
+    """
+    Devuelve un diccionario:
+
+    {
+        article_A:
+        {
+            article_B: co_purchases,
+            article_C: co_purchases,
+            ...
+        }
+    }
+    """
+
+    return (
+        df_covisitation
+        .groupby("article_id_A")
+        .apply(
+            lambda x: dict(
+                zip(
+                    x["article_id_B"],
+                    x["co_purchases"]
+                )
+            )
+        )
+        .to_dict()
+    )
+
+import numpy as np
+
+
+def calcular_covisitation_score(
+    historial_usuario,
+    articulo_candidato,
+    cov_dict,
+    decay_factor=0.7,
+    usar_log=False
+):
+    """
+    Calcula el grado de afinidad entre un usuario
+    (representado por su historial reciente)
+    y un artículo candidato.
+    """
+
+    score = 0.0
+
+    for i, articulo_historial in enumerate(historial_usuario):
+
+        peso = decay_factor ** i
+
+        raw_score = (
+            cov_dict
+            .get(articulo_historial, {})
+            .get(articulo_candidato, 0)
+        )
+
+        if usar_log:
+            raw_score = np.log1p(raw_score)
+
+        score += peso * raw_score
+
+    return score
+
 def xgboost_preprocess(
     df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
@@ -603,7 +910,7 @@ def xgboost_preprocess(
 
     # 4. Encoding de categóricas de usuario y artículo (compartido con el servido en vivo)
     user_encoded, article_encoded = encode_xgboost_categoricals(user_df, article_df)
-
+    
     # 5. Join final: dataset × features de usuario × features de artículo
     dataset = (
         dataset

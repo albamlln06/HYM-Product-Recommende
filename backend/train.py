@@ -369,7 +369,6 @@ def entrenar_modelo_xgboost(
         user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df)
         candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
         user_encoded_indexed = user_encoded.set_index("customer_id")
-
         # Si un cliente solo ha comprado artículos de un único género
         # (index_group_name: Ladieswear/Menswear/Baby-Children/Divided/Sport),
         # se le acotan las recomendaciones a ese género. Si ha comprado de
@@ -383,7 +382,10 @@ def entrenar_modelo_xgboost(
             .to_dict()
         )
         candidate_genero = candidate_pool["article_id"].map(article_to_gender)
-
+        print('Iniciando de predicciones')
+        #Hay que aplicar estrategias: Los que tengan mayor ranking bpr, los más vendidos del último mes, más populares en general, recompras
+        #artículos dentro del cluster de los que compraron, etc
+        #Por ahora esta creada la bpr
         predicciones = []
         for u in eval_users:
             if u not in user_encoded_indexed.index:
@@ -440,6 +442,67 @@ def entrenar_modelo_xgboost(
     }
     return resultado
 
+#Función de generación de candidatos global
+def generar_candidatos_hibridos(
+    clientes, 
+    user_factors_df, item_factors_df, compras_por_cliente,  # Para BPR
+    df_articles, df_train,                                  # Para Clústers y Populares
+    historial_dict, cov_dict,                               # Para Co-visitación
+    top_k_bpr=100, 
+    top_k_cluster=30, 
+    top_k_cov=20, 
+    top_k_pop=20
+):
+    """
+    Ejecuta todas las estrategias de generación de candidatos y las fusiona 
+    eliminando duplicados.
+    """
+    print(f"Generando candidatos para {len(clientes)} usuarios...")
+    
+    # 1. BPR (Colaborativo Latente)
+    print(" -> Ejecutando BPR...")
+    df_bpr = models.generar_candidatos_bpr_batch(
+        clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=top_k_bpr
+    )
+    # Conservamos solo IDs para la unión limpia
+    df_bpr_clean = df_bpr[['customer_id', 'article_id']].copy()
+    
+    # 2. Clusters (Afinidad por segmento)
+    print(" -> Ejecutando Cluster Matching...")
+    df_cluster = models.generar_candidatos_cluster(
+        clientes, compras_por_cliente, df_articles, df_train, top_k=top_k_cluster
+    )
+    
+    # 3. Co-visitación (Complementarios de carrito)
+    print(" -> Ejecutando Co-visitación...")
+    df_cov = models.generar_candidatos_covisitacion(
+        clientes, historial_dict, cov_dict, top_k=top_k_cov, usar_log=True
+    )
+    
+    # 4. Populares (Cold-Start / Tendencias)
+    print(" -> Ejecutando Populares...")
+    df_pop = models.generar_candidatos_populares(clientes, df_articles, top_k=top_k_pop)
+    
+    # --- UNIÓN DE TODOS LOS CANDIDATOS ---
+    print(" -> Fusionando y eliminando duplicados...")
+    df_hibrido = pd.concat([df_bpr_clean, df_cluster, df_cov, df_pop], ignore_index=True)
+    
+    # Quitamos duplicados. Si un artículo lo sugirió BPR y Co-visitación, nos quedamos con una fila.
+    df_hibrido = df_hibrido.drop_duplicates(subset=['customer_id', 'article_id'])
+    
+    # --- RECUPERAR EL SCORE DE BPR (Opcional, muy recomendado) ---
+    # Como tu función BPR calculó un score, lo pegamos aquí usando merge. 
+    # Los artículos que vienen de otras fuentes tendrán NaN, los rellenamos con 0.
+    df_hibrido = df_hibrido.merge(
+        df_bpr[['customer_id', 'article_id', 'bpr_score']], 
+        on=['customer_id', 'article_id'], 
+        how='left'
+    )
+    df_hibrido['bpr_score'] = df_hibrido['bpr_score'].fillna(0.0)
+    
+    print(f"¡Hecho! Total de candidatos únicos generados: {len(df_hibrido)}")
+    
+    return df_hibrido
 
 def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -456,6 +519,20 @@ def main():
 
     df_train, df_test, eval_users, actual = leave_one_out_split(df_transactions, n_test=N_TEST_PURCHASES)
     print(f"Usuarios de evaluación: {len(eval_users):,}  |  train: {len(df_train):,}  |  test: {len(df_test):,}")
+
+    historial_dict = models.generar_historial_dict(df_train) #historial para luego generar el score de co-visitación
+    # 2.2 Matriz de Co-visitación (busca en caché primero)
+    df_cov = models.construir_o_cargar_covisitacion(
+    df_train, 
+    cache_dir="backend/bpr_cache", 
+    max_pairs_per_item=100
+    )
+    # 2.3 Conversión a diccionario anidado O(1) para máxima velocidad
+    cov_dict = models.construir_diccionario_covisitacion(df_cov)
+    # (Opcional) Ya puedes liberar la memoria del DataFrame de co-visitación
+    del df_cov
+    import gc; gc.collect()
+    #Con esto ya podemos calcular el score de co-visitación para usarlo como feature, generar negativos o candidatos.
 
     # Info de categoría (product_group_name) para medir, además de MAP@12, si
     # cada modelo acierta al menos la categoría del producto (más laxo que el
