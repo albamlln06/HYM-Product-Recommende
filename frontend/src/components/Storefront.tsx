@@ -148,6 +148,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
       setCart([]);
       const recs = await getProfileRecommendations(currentProfile.customer_id);
       setRecommendations(recs);
+      setCartOpen(false);
     } catch (err) {
       setCheckoutError(handleStaleProfileError(err));
     } finally {
@@ -162,6 +163,7 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
       const currentProfile = await ensureProfile();
       const recs = await getProfileRecommendations(currentProfile.customer_id);
       setRecommendations(recs);
+      setCartOpen(false);
     } catch (err) {
       setCheckoutError(handleStaleProfileError(err));
     } finally {
@@ -171,7 +173,6 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
 
   const closeCart = () => {
     setCartOpen(false);
-    setRecommendations(null);
     setCheckoutError(null);
   };
 
@@ -200,6 +201,27 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
             ))}
           </ul>
         )}
+
+        {recommendations && (
+          <div className="recommendations-box">
+            <p className="muted">
+              {recommendations.personalized
+                ? "¡Gracias por tu compra! Estas son tus recomendaciones:"
+                : "Aún no tienes compras: aquí tienes los artículos más vendidos."}
+            </p>
+            {recommendations.personalized ? (
+              <ProductList title="Recomendado para ti (XGBoost)" articles={recommendations.recomendaciones_xgboost ?? []} />
+            ) : (
+              <ProductList title="Más vendidos" articles={recommendations.recomendaciones_populares ?? []} />
+            )}
+          </div>
+        )}
+
+        {profile && profile.historial.length > 0 && (
+          <div className="customer-detail">
+            <ProductList title={`Mis compras (${profile.historial.length})`} articles={profile.historial} />
+          </div>
+        )}
       </main>
 
       {cartOpen && (
@@ -210,93 +232,73 @@ export default function Storefront({ onSwitchToPanel }: { onSwitchToPanel: () =>
               <button className="refresh-button" onClick={closeCart}>Cerrar</button>
             </div>
 
-            {recommendations ? (
-              <div className="cart-recommendations">
-                <p className="muted">
-                  {recommendations.personalized
-                    ? "¡Gracias por tu compra! Estas son tus recomendaciones:"
-                    : "Aún no tienes compras: aquí tienes los artículos más vendidos."}
-                </p>
-                {recommendations.personalized ? (
-                  <ProductList title="Recomendado para ti (XGBoost)" articles={recommendations.recomendaciones_xgboost ?? []} />
-                ) : (
-                  <ProductList title="Más vendidos" articles={recommendations.recomendaciones_populares ?? []} />
-                )}
-                <button className="refresh-button home-search-button" onClick={closeCart}>
-                  Seguir comprando
-                </button>
-              </div>
+            {cart.length === 0 ? (
+              <p className="muted">Tu carrito está vacío.</p>
             ) : (
-              <>
-                {cart.length === 0 ? (
-                  <p className="muted">Tu carrito está vacío.</p>
-                ) : (
-                  <ul className="cart-lines">
-                    {cart.map((line) => (
-                      <li key={line.article.article_id} className="cart-line">
-                        <div className="cart-line-info">
-                          <span className="product-name">{line.article.prod_name}</span>
-                          <span className="muted">{line.article.colour}</span>
-                          <span className="tabular">{line.article.avg_price.toFixed(4)}</span>
-                        </div>
-                        <div className="cart-line-actions">
-                          <button className="qty-button" onClick={() => changeQty(line.article.article_id, -1)}>−</button>
-                          <span className="tabular">{line.qty}</span>
-                          <button className="qty-button" onClick={() => changeQty(line.article.article_id, 1)}>+</button>
-                          <button className="refresh-button" onClick={() => removeLine(line.article.article_id)}>
-                            Quitar
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                {cart.length > 0 && (
-                  <p className="cart-total tabular">Total: {cartTotal.toFixed(4)} (precio norm.)</p>
-                )}
-
-                {!profile && (
-                  <form className="profile-form" onSubmit={(e) => e.preventDefault()}>
-                    <input
-                      className="search-input"
-                      type="text"
-                      placeholder="Tu nombre…"
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                    />
-                    <input
-                      className="search-input"
-                      type="number"
-                      placeholder="Edad (opcional)"
-                      value={age}
-                      onChange={(e) => setAge(e.target.value)}
-                    />
-                    <select className="search-input" value={clubStatus} onChange={(e) => setClubStatus(e.target.value)}>
-                      <option value="">Estado de socio (opcional)</option>
-                      <option value="ACTIVE">ACTIVE</option>
-                      <option value="PRE-CREATE">PRE-CREATE</option>
-                      <option value="LEFT CLUB">LEFT CLUB</option>
-                    </select>
-                  </form>
-                )}
-
-                {checkoutError && <p className="error">{checkoutError}</p>}
-
-                <div className="panel-toolbar">
-                  <button
-                    className="refresh-button home-search-button"
-                    onClick={handleCheckout}
-                    disabled={cart.length === 0 || checkoutLoading}
-                  >
-                    {checkoutLoading ? "Procesando…" : "Finalizar compra"}
-                  </button>
-                  <button className="refresh-button" onClick={handleSkipToRecommendations} disabled={checkoutLoading}>
-                    Ver recomendaciones sin comprar
-                  </button>
-                </div>
-              </>
+              <ul className="cart-lines">
+                {cart.map((line) => (
+                  <li key={line.article.article_id} className="cart-line">
+                    <div className="cart-line-info">
+                      <span className="product-name">{line.article.prod_name}</span>
+                      <span className="muted">{line.article.colour}</span>
+                      <span className="tabular">{line.article.avg_price.toFixed(4)}</span>
+                    </div>
+                    <div className="cart-line-actions">
+                      <button className="qty-button" onClick={() => changeQty(line.article.article_id, -1)}>−</button>
+                      <span className="tabular">{line.qty}</span>
+                      <button className="qty-button" onClick={() => changeQty(line.article.article_id, 1)}>+</button>
+                      <button className="refresh-button" onClick={() => removeLine(line.article.article_id)}>
+                        Quitar
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
+
+            {cart.length > 0 && (
+              <p className="cart-total tabular">Total: {cartTotal.toFixed(4)} (precio norm.)</p>
+            )}
+
+            {!profile && (
+              <form className="profile-form" onSubmit={(e) => e.preventDefault()}>
+                <input
+                  className="search-input"
+                  type="text"
+                  placeholder="Tu nombre…"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                />
+                <input
+                  className="search-input"
+                  type="number"
+                  placeholder="Edad (opcional)"
+                  value={age}
+                  onChange={(e) => setAge(e.target.value)}
+                />
+                <select className="search-input" value={clubStatus} onChange={(e) => setClubStatus(e.target.value)}>
+                  <option value="">Estado de socio (opcional)</option>
+                  <option value="ACTIVE">ACTIVE</option>
+                  <option value="PRE-CREATE">PRE-CREATE</option>
+                  <option value="LEFT CLUB">LEFT CLUB</option>
+                </select>
+              </form>
+            )}
+
+            {checkoutError && <p className="error">{checkoutError}</p>}
+
+            <div className="panel-toolbar">
+              <button
+                className="refresh-button home-search-button"
+                onClick={handleCheckout}
+                disabled={cart.length === 0 || checkoutLoading}
+              >
+                {checkoutLoading ? "Procesando…" : "Finalizar compra"}
+              </button>
+              <button className="refresh-button" onClick={handleSkipToRecommendations} disabled={checkoutLoading}>
+                Ver recomendaciones sin comprar
+              </button>
+            </div>
           </aside>
         </div>
       )}
