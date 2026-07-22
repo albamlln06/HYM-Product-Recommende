@@ -36,7 +36,7 @@ sys.path.insert(0, str(BASE_DIR / "analysis"))
 
 from utils import preprocess, models
 
-N_CUSTOMERS = 1000
+N_CUSTOMERS = 2000
 MIN_PURCHASES = 6
 MAX_MONTHS_SINCE_LAST_PURCHASE = 12
 #Productos que se van a recomendar (nº)
