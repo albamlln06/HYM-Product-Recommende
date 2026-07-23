@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
-  Legend,
   Scatter,
   ScatterChart,
   Tooltip,
@@ -10,7 +9,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { getMlflowRuns, type MlflowRun } from "../api";
-import { FAMILY_COLORS, FAMILY_ORDER } from "../families";
+import { runGroup, type RunGroup } from "../families";
 import ComparisonPanel from "./ComparisonPanel";
 
 const REFRESH_MS = 10_000;
@@ -30,7 +29,7 @@ function formatParams(params: Record<string, string>): string {
 }
 
 interface TooltipPayloadItem {
-  payload: MlflowRun & { idx: number };
+  payload: MlflowRun & { idx: number; group: RunGroup };
 }
 
 function RunTooltip({ active, payload }: { active?: boolean; payload?: TooltipPayloadItem[] }) {
@@ -39,7 +38,7 @@ function RunTooltip({ active, payload }: { active?: boolean; payload?: TooltipPa
   return (
     <div className="chart-card" style={{ margin: 0, padding: 10, maxWidth: 320 }}>
       <strong>{run.run_name}</strong>
-      <div className="muted">{run.family} · {run.status}</div>
+      <div className="muted">{run.group.label} · {run.status}</div>
       <div className="muted">{formatTimestamp(run.start_time)}</div>
       <div className="tabular">MAP@12: {run.map12 !== null ? run.map12.toFixed(4) : "—"}</div>
       {Object.keys(run.params).length > 0 && (
@@ -53,6 +52,7 @@ export default function EvolutionPanel() {
   const [runs, setRuns] = useState<MlflowRun[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [hiddenGroups, setHiddenGroups] = useState<Set<string>>(new Set());
 
   const load = () => {
     getMlflowRuns()
@@ -71,15 +71,42 @@ export default function EvolutionPanel() {
   }, []);
 
   const chartData = useMemo(
-    () => runs.map((r, i) => ({ ...r, idx: i + 1 })),
+    () => runs.map((r, i) => ({ ...r, idx: i + 1, group: runGroup(r) })),
     [runs]
   );
 
-  const familiesPresent = FAMILY_ORDER.filter((f) => runs.some((r) => r.family === f));
+  // Grupos presentes (por familia, o por combinación n_customers/candidate_pool_size
+  // dentro de Optuna), uno por color/entrada de leyenda. Ordenados por
+  // etiqueta para que el orden en la leyenda sea estable entre refrescos.
+  const groupsPresent = useMemo(() => {
+    const byKey = new Map<string, RunGroup>();
+    for (const r of chartData) {
+      if (!byKey.has(r.group.key)) byKey.set(r.group.key, r.group);
+    }
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [chartData]);
+
+  const toggleGroup = (key: string) => {
+    setHiddenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // El filtro afecta a gráfico y tabla por igual, para que ambos cuenten
+  // siempre la misma historia. Se conserva el idx original (orden real de
+  // ejecución) en vez de renumerar, así el eje X no cambia de significado
+  // al ocultar/mostrar grupos.
+  const visibleChartData = useMemo(
+    () => chartData.filter((r) => !hiddenGroups.has(r.group.key)),
+    [chartData, hiddenGroups]
+  );
 
   const runsDesc = useMemo(
-    () => [...runs].reverse(),
-    [runs]
+    () => [...visibleChartData].reverse(),
+    [visibleChartData]
   );
 
   return (
@@ -107,13 +134,23 @@ export default function EvolutionPanel() {
       {runs.length > 0 && (
         <>
           <h3>Historial completo de runs</h3>
+          <p className="muted">Haz clic en un grupo para ocultarlo/mostrarlo en el gráfico y la tabla.</p>
           <div className="legend">
-            {familiesPresent.map((f) => (
-              <span className="legend-item" key={f}>
-                <span className="legend-dot" style={{ background: FAMILY_COLORS[f] }} />
-                {f}
-              </span>
-            ))}
+            {groupsPresent.map((g) => {
+              const off = hiddenGroups.has(g.key);
+              return (
+                <button
+                  type="button"
+                  key={g.key}
+                  className={`legend-item${off ? " legend-item--off" : ""}`}
+                  aria-pressed={!off}
+                  onClick={() => toggleGroup(g.key)}
+                >
+                  <span className="legend-dot" style={{ background: g.color }} />
+                  {g.label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="chart-card">
@@ -138,15 +175,16 @@ export default function EvolutionPanel() {
                   width={64}
                 />
                 <Tooltip content={<RunTooltip />} cursor={{ strokeDasharray: "3 3" }} />
-                <Legend />
-                {familiesPresent.map((family) => (
-                  <Scatter
-                    key={family}
-                    name={family}
-                    data={chartData.filter((r) => r.family === family)}
-                    fill={FAMILY_COLORS[family]}
-                  />
-                ))}
+                {groupsPresent
+                  .filter((g) => !hiddenGroups.has(g.key))
+                  .map((g) => (
+                    <Scatter
+                      key={g.key}
+                      name={g.label}
+                      data={visibleChartData.filter((r) => r.group.key === g.key)}
+                      fill={g.color}
+                    />
+                  ))}
               </ScatterChart>
             </ResponsiveContainer>
           </div>
@@ -166,7 +204,7 @@ export default function EvolutionPanel() {
               {runsDesc.map((r) => (
                 <tr key={r.run_id}>
                   <td>{r.run_name}</td>
-                  <td>{r.family}</td>
+                  <td>{r.group.label}</td>
                   <td><span className={`status-badge ${r.status}`}>{r.status}</span></td>
                   <td className="muted">{formatTimestamp(r.start_time)}</td>
                   <td className="tabular">{r.map12 !== null ? r.map12.toFixed(4) : "—"}</td>

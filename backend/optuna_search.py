@@ -63,7 +63,7 @@ from train import (
 
 # --- Muestra reducida solo para la búsqueda (más rápida que la de train.py) ---
 SEARCH_N_CUSTOMERS = 1000
-SEARCH_CANDIDATE_POOL_SIZE = 50000
+SEARCH_CANDIDATE_POOL_SIZE = 30000
 # Caché propia (distinta de backend/bpr_cache que usa train.py) para no
 # invalidar entre sí las cachés de co-visitación al alternar entre este
 # script y train.py con tamaños de muestra distintos.

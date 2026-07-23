@@ -5,6 +5,13 @@
   --palette-periwinkle: #5d63e0;
   --palette-lightblue: #6fa8dc;
   --palette-teal: #0b3b47;
+  --palette-amber: #c17d17;
+  /* Rampa secuencial (mismo tono, claro->oscuro) para distinguir combinaciones
+     de n_customers/candidate_pool_size dentro de los runs de Optuna. */
+  --palette-amber-1: #d99b32;
+  --palette-amber-2: #c17d17;
+  --palette-amber-3: #a3630c;
+  --palette-amber-4: #824d05;
 
   --brand-dark: var(--palette-teal);
   --brand-primary: var(--palette-blue);
@@ -27,6 +34,7 @@
   --series-3: var(--palette-periwinkle);
   --series-4: var(--palette-cyan);
   --series-5: var(--palette-lightblue);
+  --series-6: var(--palette-amber);
   --radius-s: 8px;
   --radius-m: 12px;
   --radius-l: 16px;
@@ -394,6 +402,26 @@ h3 {
   display: flex;
   align-items: center;
   gap: 6px;
+  border: none;
+  background: none;
+  padding: 3px 8px 3px 4px;
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.legend-item:hover {
+  background: var(--page);
+}
+
+.legend-item--off {
+  opacity: 0.45;
+}
+
+.legend-item--off .legend-dot {
+  background: var(--text-muted) !important;
 }
 
 .legend-dot {

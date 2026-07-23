@@ -21,11 +21,18 @@ from pydantic import BaseModel
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 sys.path.insert(0, str(BASE_DIR / "analysis"))
+sys.path.insert(0, str(BASE_DIR / "backend"))
 
 from utils import models  # noqa: E402
+# MLFLOW_EXPERIMENT_NAME se importa de train.py (en vez de redeclararlo aquí)
+# para que este endpoint y train.py/optuna_search.py apunten siempre al mismo
+# experimento: antes de este cambio train.py usaba "hym-recomendator2" pero
+# este archivo tenía hardcodeado el nombre antiguo "hym-recomendator", así
+# que ningún run posterior al cambio (ni los de train.py ni los de Optuna)
+# aparecía en el panel de evolución de modelos.
+from train import MLFLOW_EXPERIMENT_NAME  # noqa: E402
 
 TOP_N = 12
-MLFLOW_EXPERIMENT_NAME = "hym-recomendator"
 MLFLOW_DB_PATH = Path(__file__).resolve().parent / "mlflow.db"
 mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB_PATH}")
 
@@ -34,6 +41,7 @@ RUN_NAME_FAMILIES = [
     ("baseline_random", "Random"),
     ("baseline_popular", "Popular"),
     ("cluster_kmeans", "Cluster"),
+    ("optuna_", "Optuna"),
     ("xgb", "XGBoost"),
 ]
 
