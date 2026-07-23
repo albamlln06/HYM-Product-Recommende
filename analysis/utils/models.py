@@ -410,7 +410,171 @@ def recommend_by_cluster_similarity(
 # ==========================================
 # MODELO XGBOOST
 # ==========================================
+#===========================================
 
+#===========================================
+# FUNCIONES GENERACIÓN DE NEGATIVOS
+#===========================================
+def generar_negativos_populares(n_necesarios, comprados_usuario, todos_los_articulos, prob_muestreo, rng):
+    """Estrategia 1: Easy Negatives por Popularidad."""
+    if n_necesarios <= 0: return set()
+    
+    articulos_usados = comprados_usuario.copy()
+    n_generados = 0
+    intentos = 0
+    batch_size = min(n_necesarios * 3, len(todos_los_articulos))
+    
+    negativos = set()
+    
+    while n_generados < n_necesarios and intentos < n_necesarios * 20:
+        candidatos = rng.choice(
+            todos_los_articulos,
+            size=batch_size,
+            p=prob_muestreo,
+            replace=True
+        )
+        
+        intentos += len(candidatos)
+        
+        for c in candidatos:
+            if c not in articulos_usados:
+                negativos.add(c)
+                articulos_usados.add(c)
+                n_generados += 1
+                
+                if n_generados >= n_necesarios:
+                    return negativos
+                    
+    return negativos
+
+def generar_negativos_cluster(n, positivos, comprados_usuario, article_to_cluster, cluster_to_articles_sorted, rng):
+    """Estrategia 2: Hard Negatives por Atributos (Pre-ordenados)."""
+    if n <= 0 or not positivos: return set()
+    
+    negativos = set()
+    intentos = 0
+    max_intentos = n * 5
+    lista_positivos = list(positivos) # Asegurar que es lista para rng.choice
+    
+    while len(negativos) < n and intentos < max_intentos:
+        pos = rng.choice(lista_positivos)
+        cluster = article_to_cluster.get(pos)
+        
+        if cluster and cluster in cluster_to_articles_sorted:
+            candidatos = cluster_to_articles_sorted[cluster]
+            longitud = len(candidatos)
+            
+            if longitud > 0:
+                idx = int(rng.exponential(scale=longitud/4))
+                idx = min(idx, longitud - 1)
+                cand = candidatos[idx]
+                
+                if cand != pos and cand not in comprados_usuario:
+                    negativos.add(cand)
+                    
+        intentos += 1
+        
+    return negativos
+
+def generar_negativos_covisitacion(n, positivos, comprados_usuario, cov_dict, skip_top_n, rng):
+    """Estrategia 4: Hard Negatives por Co-visitación (Ocultos/No evidentes)"""
+    if n <= 0 or not positivos: return set()
+    
+    negativos = set()
+    pool_candidatos = []
+    
+    for pos in positivos:
+        vecinos = cov_dict.get(pos, {})
+        if vecinos:
+            ordenados = sorted(vecinos.keys(), key=lambda x: vecinos[x], reverse=True)
+            hard_candidatos = ordenados[skip_top_n:]
+            pool_candidatos.extend(hard_candidatos)
+            
+    valid_candidatos = [c for c in pool_candidatos if c not in comprados_usuario and c not in positivos]
+    
+    if valid_candidatos:
+        # CORRECCIÓN: Usar rng.choice con replace=False
+        n_sample = min(n, len(valid_candidatos))
+        seleccionados = rng.choice(valid_candidatos, size=n_sample, replace=False)
+        negativos.update(seleccionados)
+        
+    return negativos
+
+def generar_negativos_bpr(n, positivos, comprados_usuario, bpr_neighbors, rng):
+    """Estrategia 3: Hard Negatives por Comportamiento Colaborativo (BPR)"""
+    if n <= 0 or not positivos: return set()
+    
+    negativos = set()
+    pool_candidatos = []
+    
+    for pos in positivos:
+        pool_candidatos.extend(bpr_neighbors.get(pos, []))
+        
+    valid_candidatos = [c for c in pool_candidatos if c not in comprados_usuario and c not in positivos]
+    
+    if valid_candidatos:
+        # CORRECCIÓN: Usar rng.choice con replace=False
+        n_sample = min(n, len(valid_candidatos))
+        seleccionados = rng.choice(valid_candidatos, size=n_sample, replace=False)
+        negativos.update(seleccionados)
+        
+    return negativos
+
+def generar_dataset_negativos(
+    n_total, positivos, comprados_usuario,
+    todos_los_articulos, prob_muestreo,
+    article_to_cluster, cluster_to_articles_sorted,
+    cov_dict, bpr_neighbors,
+    rng,
+    proporciones={"popular": 0.2, "cluster": 0.3, "bpr": 0.3, "cov": 0.2},
+    skip_top_n_cov=3
+):
+    """
+    Orquestador maestro que combina todas las estrategias de negativos.
+    Si alguna estrategia se queda corta, rellena el faltante con populares.
+    """
+    negativos_finales = set()
+    
+    # 1. Calcular las cuotas teóricas según proporciones
+    n_cov = int(n_total * proporciones.get("cov", 0.2))
+    n_bpr = int(n_total * proporciones.get("bpr", 0.3))
+    n_clu = int(n_total * proporciones.get("cluster", 0.3))
+    # El resto se asigna inicialmente a populares
+    n_pop = n_total - (n_cov + n_bpr + n_clu) 
+    
+    # 2. Generar Co-visitación
+    if n_cov > 0:
+        neg_cov = generar_negativos_covisitacion(
+            n_cov, positivos, comprados_usuario, cov_dict, skip_top_n_cov, rng
+        )
+        negativos_finales.update(neg_cov)
+        
+    # 3. Generar BPR
+    if n_bpr > 0:
+        neg_bpr = generar_negativos_bpr(
+            n_bpr, positivos, comprados_usuario, bpr_neighbors, rng
+        )
+        negativos_finales.update(neg_bpr)
+        
+    # 4. Generar Cluster
+    if n_clu > 0:
+        neg_clu = generar_negativos_cluster(
+            n_clu, positivos, comprados_usuario, article_to_cluster, cluster_to_articles_sorted, rng
+        )
+        negativos_finales.update(neg_clu)
+        
+    # 5. Generar Populares (Actúa como Fallback general)
+    # Calculamos cuántos faltan REALMENTE para llegar a n_total
+    faltantes = n_total - len(negativos_finales)
+    
+    if faltantes > 0:
+        neg_pop = generar_negativos_populares(
+            faltantes, comprados_usuario, todos_los_articulos, prob_muestreo, rng
+        )
+        negativos_finales.update(neg_pop)
+        
+    # Convertimos a lista final para que sea manejable en DataFrames
+    return list(negativos_finales)
 def generar_negativos_cliente(
     positivos_cliente,
     cliente,
@@ -565,6 +729,48 @@ def get_or_train_bpr(df_transactions, bpr_params, cache_dir="model_cache"):
         json.dump(current_config, f, indent=4)
         
     return user_factors_df, item_factors_df
+
+
+def precalcular_vecinos_bpr_optimo(item_factors_df, top_k=50, batch_size=2000):
+    """
+    Calcula los vecinos BPR vectorizando por bloques. 
+    Seguro para catálogos >100k y ordenadores con RAM limitada (ocupa < 1GB de RAM extra).
+    """
+    print("Precalculando vecinos BPR en bloques (RAM Safe)...")
+    item_ids = item_factors_df.index.to_numpy()
+    # Forzamos float32 para reducir la memoria a la mitad
+    matriz_items = item_factors_df.to_numpy(dtype=np.float32) 
+    matriz_items_T = matriz_items.T
+    
+    bpr_neighbors = {}
+    n_items = len(item_ids)
+    
+    for start_idx in range(0, n_items, batch_size):
+        end_idx = min(start_idx + batch_size, n_items)
+        
+        # Producto escalar vectorizado del bloque
+        # Tamaño: (batch_size, n_items). Ej: (2000, 103000)
+        bloque_similitud = matriz_items[start_idx:end_idx] @ matriz_items_T
+        
+        for i, idx_real in enumerate(range(start_idx, end_idx)):
+            scores = bloque_similitud[i]
+            
+            # argpartition aísla los top_k rapidísimo sin ordenar todo el array
+            # Ponemos top_k + 1 porque el artículo consigo mismo será el score máximo
+            top_indices = np.argpartition(scores, -(top_k + 1))[-(top_k + 1):]
+            
+            # Ordenamos ese pequeño subconjunto de mayor a menor
+            top_indices = top_indices[np.argsort(-scores[top_indices])]
+            
+            # Guardamos excluyendo el propio artículo
+            vecinos = [item_ids[idx] for idx in top_indices if idx != idx_real][:top_k]
+            bpr_neighbors[item_ids[idx_real]] = vecinos
+            
+    return bpr_neighbors
+
+#==================================
+# FUNCIONES DE GENERACIÓN DE CANDIDATOS
+#==================================
 
 
 def generar_candidatos_bpr_batch(clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=100):

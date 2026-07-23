@@ -598,6 +598,10 @@ def main():
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
         extra_params=extra_params_datos,
     )
+    #Generamos diccionarios de clusters para usarlos en varias funciones (negativos, candidatos)
+    df_cluster = resultado_cluster["df_merged"][["article_id", "cluster"]]
+    article_to_cluster = df_cluster.set_index("article_id")["cluster"].to_dict()
+    ventas_article = article_df[["article_id", "sales_volume"]]
     print(f"Entrenamiento de clustering: {to_cluster - t0:.2f}s")
     print("Entrenando modelo XGBoost...")
     resultado_xgboost = entrenar_modelo_xgboost(
