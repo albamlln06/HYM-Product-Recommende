@@ -32,6 +32,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
+TRAINING_CACHE_DIR = MODELS_DIR / "training_cache"
 sys.path.insert(0, str(BASE_DIR / "analysis"))
 
 from utils import preprocess, models
@@ -66,6 +67,19 @@ XGB_LEARNING_RATE = 0.06
 BPR_FACTORS = 32
 BPR_ITERATIONS = 50
 BPR_REGULARIZATION = 0.05
+
+# --- Interruptores modulares del pipeline ---
+USE_CACHED_CLUSTERING = True
+USE_HYBRID_NEGATIVES = True
+USE_HYBRID_CANDIDATES = True
+
+NEGATIVE_PROPORTIONS = {"popular": 0.2, "cluster": 0.3, "bpr": 0.3, "cov": 0.2}
+BPR_NEIGHBORS_TOP_K = 50
+
+TOP_K_CANDIDATES_BPR = 100
+TOP_K_CANDIDATES_CLUSTER = 30
+TOP_K_CANDIDATES_COV = 20
+TOP_K_CANDIDATES_POPULAR = 20
 
 # --- MLflow ---
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator2"
@@ -227,21 +241,34 @@ def entrenar_modelo_cluster(
     article_to_category, actual_categories_test, categorias_compradas_general,
     k_clusters=8, k_eval=12, random_state=42,
     run_name="cluster_kmeans", extra_params=None,
+    use_cache=True, cache_dir=None,
 ):
     """Entrena el modelo de clustering (KMeans + similitud coseno) y lo registra en MLflow."""
     with mlflow.start_run(run_name=run_name):
-        params = {"k_clusters": k_clusters, "random_state": random_state}
+        params = {"k_clusters": k_clusters, "random_state": random_state, "use_cache": use_cache}
         if extra_params:
             params.update(extra_params)
         mlflow.log_params(params)
 
-        X_final, article_ids, scaler, df_products_enriched = models.clustering_preprocess(
-            df_customers, df_products, df_train
-        )
-        df_clusters, kmeans_model = models.fit_product_clustering(X_final, k_clusters, article_ids)
-        df_merged, cluster_summary = models.inspect_clusters(
-            df_products=df_products_enriched, df_clusters=df_clusters, category_col="product_group_name"
-        )
+        if use_cache:
+            cluster_artifacts = models.construir_o_cargar_clustering(
+                df_customers, df_products, df_train,
+                k_clusters=k_clusters,
+                cache_dir=str(cache_dir or TRAINING_CACHE_DIR),
+            )
+            X_final = cluster_artifacts["X_final"]
+            article_ids = cluster_artifacts["article_ids"]
+            scaler = cluster_artifacts["scaler"]
+            kmeans_model = cluster_artifacts["kmeans_model"]
+            df_merged = cluster_artifacts["df_merged"]
+        else:
+            X_final, article_ids, scaler, df_products_enriched = models.clustering_preprocess(
+                df_customers, df_products, df_train
+            )
+            df_clusters, kmeans_model = models.fit_product_clustering(X_final, k_clusters, article_ids)
+            df_merged, _cluster_summary = models.inspect_clusters(
+                df_products=df_products_enriched, df_clusters=df_clusters, category_col="product_group_name"
+            )
         X_df = pd.DataFrame(X_final, index=article_ids)
 
         predicciones = []
@@ -291,6 +318,13 @@ def entrenar_modelo_xgboost(
     run_name="xgboost", extra_params=None,
     historial_dict=None, cov_dict=None,
     inference_batch_size=100,
+    use_hybrid_negatives=False, negative_proportions=None,
+    article_to_cluster=None, cluster_to_articles_sorted=None,
+    bpr_neighbors_top_k=50, cache_dir=None,
+    use_hybrid_candidates=False,
+    candidate_top_k_bpr=100, candidate_top_k_cluster=30,
+    candidate_top_k_cov=20, candidate_top_k_pop=20,
+    df_articles_for_candidates=None,
 ):
     """
     Entrena el modelo de ranking XGBoost y lo registra en MLflow.
@@ -349,6 +383,14 @@ def entrenar_modelo_xgboost(
             "bpr_factors": bpr_factors,
             "bpr_iterations": bpr_iterations,
             "bpr_regularization": bpr_regularization,
+            "use_hybrid_negatives": use_hybrid_negatives,
+            "negative_proportions": json.dumps(negative_proportions or {}, sort_keys=True),
+            "bpr_neighbors_top_k": bpr_neighbors_top_k,
+            "use_hybrid_candidates": use_hybrid_candidates,
+            "candidate_top_k_bpr": candidate_top_k_bpr,
+            "candidate_top_k_cluster": candidate_top_k_cluster,
+            "candidate_top_k_cov": candidate_top_k_cov,
+            "candidate_top_k_pop": candidate_top_k_pop,
         }
         if extra_params:
             params.update(extra_params)
@@ -360,6 +402,12 @@ def entrenar_modelo_xgboost(
             n_negativos_por_positivo=n_negativos_por_positivo, random_state=random_state,
             bpr_factors=bpr_factors, bpr_iterations=bpr_iterations, bpr_regularization=bpr_regularization,
             historial_dict=historial_dict, cov_dict=cov_dict,
+            use_hybrid_negatives=use_hybrid_negatives,
+            negative_proportions=negative_proportions,
+            article_to_cluster=article_to_cluster,
+            cluster_to_articles_sorted=cluster_to_articles_sorted,
+            bpr_neighbors_top_k=bpr_neighbors_top_k,
+            cache_dir=str(cache_dir or TRAINING_CACHE_DIR),
         )
         feature_cols = list(X.columns)
         
@@ -405,6 +453,7 @@ def entrenar_modelo_xgboost(
         t0_infer = time.time()
         user_encoded, article_encoded = models.encode_xgboost_categoricals(user_df, article_df)
         candidate_pool = article_encoded.sort_values("sales_volume", ascending=False).head(candidate_pool_size)
+        candidate_pairs = None
         user_encoded_indexed = user_encoded.set_index("customer_id")
         # Si un cliente solo ha comprado artículos de un único género
         # (index_group_name: Ladieswear/Menswear/Baby-Children/Divided/Sport),
@@ -419,6 +468,31 @@ def entrenar_modelo_xgboost(
             .to_dict()
         )
         candidate_genero = candidate_pool["article_id"].map(article_to_gender)
+        if use_hybrid_candidates:
+            df_articles_candidates = (
+                df_articles_for_candidates
+                if df_articles_for_candidates is not None
+                else article_df
+            )
+            compras_por_cliente = (
+                df_train.groupby("customer_id")["article_id"].apply(set).to_dict()
+            )
+            candidate_pairs = models.generar_candidatos_hibridos(
+                eval_users,
+                user_factors_df,
+                item_factors_df,
+                compras_por_cliente,
+                df_articles_candidates,
+                df_train,
+                historial_dict,
+                cov_dict,
+                top_k_bpr=candidate_top_k_bpr,
+                top_k_cluster=candidate_top_k_cluster,
+                top_k_cov=candidate_top_k_cov,
+                top_k_pop=candidate_top_k_pop,
+            )
+            candidate_pool = article_encoded
+            candidate_genero = candidate_pool["article_id"].map(article_to_gender)
         print('Iniciando de predicciones')
         #Hay que aplicar estrategias: Los que tengan mayor ranking bpr, los más vendidos del último mes, más populares en general, recompras
         #artículos dentro del cluster de los que compraron, etc
@@ -428,6 +502,7 @@ def entrenar_modelo_xgboost(
             generos_por_usuario, user_factors_df, item_factors_df, feature_cols,
             historial_dict=historial_dict, cov_dict=cov_dict, top_n=k_eval,
             batch_size=inference_batch_size,
+            candidate_pairs=candidate_pairs,
         )
         predicciones = [predicciones_dict.get(u, []) for u in eval_users]
 
@@ -462,71 +537,11 @@ def entrenar_modelo_xgboost(
     }
     return resultado
 
-#Función de generación de candidatos global
-def generar_candidatos_hibridos(
-    clientes, 
-    user_factors_df, item_factors_df, compras_por_cliente,  # Para BPR
-    df_articles, df_train,                                  # Para Clústers y Populares
-    historial_dict, cov_dict,                               # Para Co-visitación
-    top_k_bpr=100, 
-    top_k_cluster=30, 
-    top_k_cov=20, 
-    top_k_pop=20
-):
-    """
-    Ejecuta todas las estrategias de generación de candidatos y las fusiona 
-    eliminando duplicados.
-    """
-    print(f"Generando candidatos para {len(clientes)} usuarios...")
-    
-    # 1. BPR (Colaborativo Latente)
-    print(" -> Ejecutando BPR...")
-    df_bpr = models.generar_candidatos_bpr_batch(
-        clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=top_k_bpr
-    )
-    # Conservamos solo IDs para la unión limpia
-    df_bpr_clean = df_bpr[['customer_id', 'article_id']].copy()
-    
-    # 2. Clusters (Afinidad por segmento)
-    print(" -> Ejecutando Cluster Matching...")
-    df_cluster = models.generar_candidatos_cluster(
-        clientes, compras_por_cliente, df_articles, df_train, top_k=top_k_cluster
-    )
-    
-    # 3. Co-visitación (Complementarios de carrito)
-    print(" -> Ejecutando Co-visitación...")
-    df_cov = models.generar_candidatos_covisitacion(
-        clientes, historial_dict, cov_dict, top_k=top_k_cov, usar_log=True
-    )
-    
-    # 4. Populares (Cold-Start / Tendencias)
-    print(" -> Ejecutando Populares...")
-    df_pop = models.generar_candidatos_populares(clientes, df_articles, top_k=top_k_pop)
-    
-    # --- UNIÓN DE TODOS LOS CANDIDATOS ---
-    print(" -> Fusionando y eliminando duplicados...")
-    df_hibrido = pd.concat([df_bpr_clean, df_cluster, df_cov, df_pop], ignore_index=True)
-    
-    # Quitamos duplicados. Si un artículo lo sugirió BPR y Co-visitación, nos quedamos con una fila.
-    df_hibrido = df_hibrido.drop_duplicates(subset=['customer_id', 'article_id'])
-    
-    # --- RECUPERAR EL SCORE DE BPR (Opcional, muy recomendado) ---
-    # Como tu función BPR calculó un score, lo pegamos aquí usando merge. 
-    # Los artículos que vienen de otras fuentes tendrán NaN, los rellenamos con 0.
-    df_hibrido = df_hibrido.merge(
-        df_bpr[['customer_id', 'article_id', 'bpr_score']], 
-        on=['customer_id', 'article_id'], 
-        how='left'
-    )
-    df_hibrido['bpr_score'] = df_hibrido['bpr_score'].fillna(0.0)
-    
-    print(f"¡Hecho! Total de candidatos únicos generados: {len(df_hibrido)}")
-    
-    return df_hibrido
 
 def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+    TRAINING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     print(f"Cargando muestra de {N_CUSTOMERS} clientes...")
     df_customers, df_products, df_transactions = preprocess.load_complete_dataset_filtered_number_customers(
@@ -544,7 +559,7 @@ def main():
     # 2.2 Matriz de Co-visitación (busca en caché primero)
     df_cov = models.construir_o_cargar_covisitacion(
     df_train, 
-    cache_dir="backend/bpr_cache", 
+    cache_dir=str(TRAINING_CACHE_DIR), 
     max_pairs_per_item=100
     )
     # 2.3 Conversión a diccionario anidado O(1) para máxima velocidad
@@ -597,12 +612,14 @@ def main():
         article_to_category, actual_categories_test, categorias_compradas_general,
         k_clusters=K_CLUSTERS, k_eval=K_EVAL, random_state=RANDOM_STATE,
         extra_params=extra_params_datos,
+        use_cache=USE_CACHED_CLUSTERING,
+        cache_dir=TRAINING_CACHE_DIR,
     )
     #Generamos diccionarios de clusters para usarlos en varias funciones (negativos, candidatos)
-    df_cluster = resultado_cluster["df_merged"][["article_id", "cluster"]]
-    article_to_cluster = df_cluster.set_index("article_id")["cluster"].to_dict()
-    ventas_article = article_df[["article_id", "sales_volume"]]
-    print(f"Entrenamiento de clustering: {to_cluster - t0:.2f}s")
+    article_to_cluster, cluster_to_articles_sorted = models.build_cluster_negative_artifacts(
+        resultado_cluster["df_merged"]
+    )
+    print(f"Entrenamiento de clustering: {time.time() - to_cluster:.2f}s")
     print("Entrenando modelo XGBoost...")
     resultado_xgboost = entrenar_modelo_xgboost(
         df_customers, df_products, df_train, eval_users, actual,
@@ -612,6 +629,18 @@ def main():
         bpr_factors=BPR_FACTORS, bpr_iterations=BPR_ITERATIONS, bpr_regularization=BPR_REGULARIZATION,
         k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,
         historial_dict=historial_dict, cov_dict=cov_dict,
+        use_hybrid_negatives=USE_HYBRID_NEGATIVES,
+        negative_proportions=NEGATIVE_PROPORTIONS,
+        article_to_cluster=article_to_cluster,
+        cluster_to_articles_sorted=cluster_to_articles_sorted,
+        bpr_neighbors_top_k=BPR_NEIGHBORS_TOP_K,
+        cache_dir=TRAINING_CACHE_DIR,
+        use_hybrid_candidates=USE_HYBRID_CANDIDATES,
+        candidate_top_k_bpr=TOP_K_CANDIDATES_BPR,
+        candidate_top_k_cluster=TOP_K_CANDIDATES_CLUSTER,
+        candidate_top_k_cov=TOP_K_CANDIDATES_COV,
+        candidate_top_k_pop=TOP_K_CANDIDATES_POPULAR,
+        df_articles_for_candidates=resultado_cluster["df_merged"],
     )
 
     # --- Métricas ---

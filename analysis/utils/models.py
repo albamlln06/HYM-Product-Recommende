@@ -12,6 +12,8 @@ from utils.preprocess import auto_optimize_categories, imputar_nulos_tfm
 import os 
 import json
 import time
+import hashlib
+import joblib
 
 CATEGORICAL_FEATURES_CLUSTER = [
     'product_group_name',
@@ -56,6 +58,68 @@ NUMERIC_FEATURES_XGBOOST = [
     'sales_last_30d',
     'product_age_days',
 ]
+
+
+def _json_default(value):
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return str(value)
+
+
+def _stable_hash(payload):
+    raw = json.dumps(payload, sort_keys=True, default=_json_default).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _data_fingerprint(df, cols):
+    available_cols = [c for c in cols if c in df.columns]
+    payload = {
+        "num_rows": len(df),
+        "columns": available_cols,
+    }
+    for col in available_cols:
+        payload[f"{col}_nunique"] = int(df[col].nunique(dropna=True))
+        if col == "t_dat":
+            fechas = pd.to_datetime(df[col])
+            payload["t_dat_min"] = fechas.min()
+            payload["t_dat_max"] = fechas.max()
+
+    if available_cols and len(df) > 0:
+        sample = df[available_cols].copy()
+        if "t_dat" in sample.columns:
+            sample["t_dat"] = pd.to_datetime(sample["t_dat"]).astype("int64")
+        row_hashes = pd.util.hash_pandas_object(sample, index=False)
+        payload["content_hash"] = int(row_hashes.sum() % np.iinfo(np.uint64).max)
+
+    return payload
+
+
+def _versioned_cache_dir(cache_dir, artifact_name, config):
+    cache_key = _stable_hash(config)
+    path = os.path.join(cache_dir, f"{artifact_name}_{cache_key}")
+    return path, cache_key
+
+
+def build_cluster_negative_artifacts(df_articles_with_cluster):
+    """
+    Prepara los diccionarios O(1) necesarios para negativos/candidatos por cluster.
+    df_articles_with_cluster debe contener article_id, cluster y sales_volume.
+    """
+    if df_articles_with_cluster is None or "cluster" not in df_articles_with_cluster.columns:
+        return {}, {}
+
+    df_cluster = df_articles_with_cluster[["article_id", "cluster", "sales_volume"]].copy()
+    df_cluster["sales_volume"] = df_cluster["sales_volume"].fillna(0)
+    article_to_cluster = df_cluster.set_index("article_id")["cluster"].to_dict()
+    cluster_to_articles_sorted = (
+        df_cluster.sort_values(["cluster", "sales_volume"], ascending=[True, False])
+        .groupby("cluster")["article_id"]
+        .apply(list)
+        .to_dict()
+    )
+    return article_to_cluster, cluster_to_articles_sorted
 
 def compute_article_features(df_customers, df_products, df_transactions):
     """
@@ -449,7 +513,7 @@ def generar_negativos_populares(n_necesarios, comprados_usuario, todos_los_artic
 
 def generar_negativos_cluster(n, positivos, comprados_usuario, article_to_cluster, cluster_to_articles_sorted, rng):
     """Estrategia 2: Hard Negatives por Atributos (Pre-ordenados)."""
-    if n <= 0 or not positivos: return set()
+    if n <= 0 or not positivos or not article_to_cluster or not cluster_to_articles_sorted: return set()
     
     negativos = set()
     intentos = 0
@@ -460,7 +524,7 @@ def generar_negativos_cluster(n, positivos, comprados_usuario, article_to_cluste
         pos = rng.choice(lista_positivos)
         cluster = article_to_cluster.get(pos)
         
-        if cluster and cluster in cluster_to_articles_sorted:
+        if cluster is not None and cluster in cluster_to_articles_sorted:
             candidatos = cluster_to_articles_sorted[cluster]
             longitud = len(candidatos)
             
@@ -478,7 +542,7 @@ def generar_negativos_cluster(n, positivos, comprados_usuario, article_to_cluste
 
 def generar_negativos_covisitacion(n, positivos, comprados_usuario, cov_dict, skip_top_n, rng):
     """Estrategia 4: Hard Negatives por Co-visitación (Ocultos/No evidentes)"""
-    if n <= 0 or not positivos: return set()
+    if n <= 0 or not positivos or not cov_dict: return set()
     
     negativos = set()
     pool_candidatos = []
@@ -502,7 +566,7 @@ def generar_negativos_covisitacion(n, positivos, comprados_usuario, cov_dict, sk
 
 def generar_negativos_bpr(n, positivos, comprados_usuario, bpr_neighbors, rng):
     """Estrategia 3: Hard Negatives por Comportamiento Colaborativo (BPR)"""
-    if n <= 0 or not positivos: return set()
+    if n <= 0 or not positivos or not bpr_neighbors: return set()
     
     negativos = set()
     pool_candidatos = []
@@ -674,62 +738,42 @@ def get_or_train_bpr(df_transactions, bpr_params, cache_dir="model_cache"):
     Controlador de caché para el modelo BPR. 
     Comprueba si los parámetros o los datos han cambiado antes de reentrenar.
     """
-    os.makedirs(cache_dir, exist_ok=True)
-    
-    config_path = os.path.join(cache_dir, "bpr_config.json")
-    user_factors_path = os.path.join(cache_dir, "user_factors.parquet")
-    item_factors_path = os.path.join(cache_dir, "item_factors.parquet")
-    
-    # 1. Definir el estado actual (Parámetros + Huella dactilar de los datos)
     current_config = {
-        # Parámetros del modelo
         "factors": bpr_params.get("factors", 32),
         "iterations": bpr_params.get("iterations", 15),
         "learning_rate": bpr_params.get("learning_rate", 0.05),
         "regularization": bpr_params.get("regularization", 0.01),
         "random_state": bpr_params.get("random_state", 42),
-        
-        # Huella dactilar de los datos (detecta si cambia el train_set)
-        "num_transactions": len(df_transactions),
-        "num_unique_users": df_transactions['customer_id'].nunique(),
-        "num_unique_items": df_transactions['article_id'].nunique()
+        "data": _data_fingerprint(df_transactions, ["customer_id", "article_id", "t_dat"]),
     }
-    
-    # 2. Comprobar si existe caché y si la configuración es idéntica
+
+    os.makedirs(cache_dir, exist_ok=True)
+    artifact_dir, cache_key = _versioned_cache_dir(cache_dir, "bpr", current_config)
+    config_path = os.path.join(artifact_dir, "config.json")
+    user_factors_path = os.path.join(artifact_dir, "user_factors.parquet")
+    item_factors_path = os.path.join(artifact_dir, "item_factors.parquet")
+
     if os.path.exists(config_path) and os.path.exists(user_factors_path) and os.path.exists(item_factors_path):
-        with open(config_path, "r") as f:
-            cached_config = json.load(f)
-            
-        if cached_config == current_config:
-            print("✅ BPR Cache: Parámetros y datos intactos. Cargando matrices desde disco...")
-            user_factors_df = pd.read_parquet(user_factors_path)
-            item_factors_df = pd.read_parquet(item_factors_path)
-            return user_factors_df, item_factors_df
-        else:
-            print("⚠️ BPR Cache: Detectados cambios en datos o parámetros. Reentrenando...")
-    else:
-        print("🔍 BPR Cache: No se encontró caché. Entrenando desde cero...")
-        
-    # 3. Si no hay caché válida, entrenamos
+        print(f"BPR Cache: cargando version {cache_key} desde disco...")
+        return pd.read_parquet(user_factors_path), pd.read_parquet(item_factors_path)
+
+    print(f"BPR Cache: no existe version {cache_key}. Entrenando desde cero...")
     user_factors_df, item_factors_df = train_bpr_model(
-        df_transactions, 
+        df_transactions,
         factors=current_config["factors"],
         iterations=current_config["iterations"],
         learning_rate=current_config["learning_rate"],
         regularization=current_config["regularization"],
-        random_state=current_config["random_state"]
+        random_state=current_config["random_state"],
     )
-    
-    os.makedirs(cache_dir,exist_ok = True)
-    # 4. Guardamos las nuevas matrices y el nuevo archivo de control
+
+    os.makedirs(artifact_dir, exist_ok=True)
     user_factors_df.to_parquet(user_factors_path)
     item_factors_df.to_parquet(item_factors_path)
-    
     with open(config_path, "w") as f:
-        json.dump(current_config, f, indent=4)
-        
-    return user_factors_df, item_factors_df
+        json.dump(current_config, f, indent=4, default=_json_default)
 
+    return user_factors_df, item_factors_df
 
 def precalcular_vecinos_bpr_optimo(item_factors_df, top_k=50, batch_size=2000):
     """
@@ -767,6 +811,134 @@ def precalcular_vecinos_bpr_optimo(item_factors_df, top_k=50, batch_size=2000):
             bpr_neighbors[item_ids[idx_real]] = vecinos
             
     return bpr_neighbors
+
+
+def get_or_precalcular_vecinos_bpr(item_factors_df, top_k=50, batch_size=2000, cache_dir="model_cache"):
+    """
+    Cachea los vecinos BPR como parquet versionado para evitar recalcular la
+    similitud item-item cuando no cambian factores ni parametros.
+    """
+    current_config = {
+        "top_k": top_k,
+        "batch_size": batch_size,
+        "item_factors": {
+            "shape": list(item_factors_df.shape),
+            "index_hash": _stable_hash(list(map(str, item_factors_df.index.tolist()))),
+            "values_hash": int(
+                pd.util.hash_pandas_object(
+                    item_factors_df.reset_index(drop=True), index=False
+                ).sum() % np.iinfo(np.uint64).max
+            ),
+        },
+    }
+
+    os.makedirs(cache_dir, exist_ok=True)
+    artifact_dir, cache_key = _versioned_cache_dir(cache_dir, "bpr_neighbors", current_config)
+    config_path = os.path.join(artifact_dir, "config.json")
+    neighbors_path = os.path.join(artifact_dir, "neighbors.parquet")
+
+    if os.path.exists(config_path) and os.path.exists(neighbors_path):
+        print(f"BPR neighbors Cache: cargando version {cache_key} desde disco...")
+        df_neighbors = pd.read_parquet(neighbors_path)
+        return (
+            df_neighbors.sort_values(["article_id", "rank"])
+            .groupby("article_id")["neighbor_id"]
+            .apply(list)
+            .to_dict()
+        )
+
+    print(f"BPR neighbors Cache: no existe version {cache_key}. Calculando vecinos...")
+    bpr_neighbors = precalcular_vecinos_bpr_optimo(
+        item_factors_df, top_k=top_k, batch_size=batch_size
+    )
+    rows = [
+        {"article_id": article_id, "neighbor_id": neighbor_id, "rank": rank}
+        for article_id, neighbors in bpr_neighbors.items()
+        for rank, neighbor_id in enumerate(neighbors)
+    ]
+
+    os.makedirs(artifact_dir, exist_ok=True)
+    pd.DataFrame(rows, columns=["article_id", "neighbor_id", "rank"]).to_parquet(
+        neighbors_path, index=False
+    )
+    with open(config_path, "w") as f:
+        json.dump(current_config, f, indent=4, default=_json_default)
+
+    return bpr_neighbors
+
+
+def construir_o_cargar_clustering(
+    df_customers,
+    df_products,
+    df_transactions,
+    k_clusters=8,
+    cache_dir="model_cache",
+):
+    """
+    Entrena o carga los artefactos de clustering con cache versionada.
+    Devuelve el mismo conjunto de piezas que usa entrenar_modelo_cluster.
+    """
+    current_config = {
+        "k_clusters": k_clusters,
+        "data": _data_fingerprint(df_transactions, ["customer_id", "article_id", "t_dat", "price", "is_online"]),
+        "products": _data_fingerprint(df_products, ["article_id"] + CATEGORICAL_FEATURES_CLUSTER),
+        "customers": _data_fingerprint(df_customers, ["customer_id", "age"]),
+    }
+
+    os.makedirs(cache_dir, exist_ok=True)
+    artifact_dir, cache_key = _versioned_cache_dir(cache_dir, "clustering", current_config)
+    config_path = os.path.join(artifact_dir, "config.json")
+    merged_path = os.path.join(artifact_dir, "df_merged.parquet")
+    clusters_path = os.path.join(artifact_dir, "df_clusters.parquet")
+    x_final_path = os.path.join(artifact_dir, "X_final.npy")
+    article_ids_path = os.path.join(artifact_dir, "article_ids.npy")
+    kmeans_path = os.path.join(artifact_dir, "kmeans.joblib")
+    scaler_path = os.path.join(artifact_dir, "scaler.joblib")
+
+    required_paths = [
+        config_path, merged_path, clusters_path, x_final_path,
+        article_ids_path, kmeans_path, scaler_path,
+    ]
+    if all(os.path.exists(path) for path in required_paths):
+        print(f"Clustering Cache: cargando version {cache_key} desde disco...")
+        return {
+            "df_merged": pd.read_parquet(merged_path),
+            "df_clusters": pd.read_parquet(clusters_path),
+            "X_final": np.load(x_final_path, allow_pickle=True),
+            "article_ids": np.load(article_ids_path, allow_pickle=True),
+            "kmeans_model": joblib.load(kmeans_path),
+            "scaler": joblib.load(scaler_path),
+        }
+
+    print(f"Clustering Cache: no existe version {cache_key}. Entrenando clustering...")
+    X_final, article_ids, scaler, df_products_enriched = clustering_preprocess(
+        df_customers, df_products, df_transactions
+    )
+    df_clusters, kmeans_model = fit_product_clustering(X_final, k_clusters, article_ids)
+    df_merged, _summary = inspect_clusters(
+        df_products=df_products_enriched,
+        df_clusters=df_clusters,
+        category_col="product_group_name",
+    )
+
+    os.makedirs(artifact_dir, exist_ok=True)
+    df_merged.to_parquet(merged_path, index=False)
+    df_clusters.to_parquet(clusters_path, index=False)
+    np.save(x_final_path, X_final)
+    np.save(article_ids_path, article_ids)
+    joblib.dump(kmeans_model, kmeans_path)
+    joblib.dump(scaler, scaler_path)
+    with open(config_path, "w") as f:
+        json.dump(current_config, f, indent=4, default=_json_default)
+
+    return {
+        "df_merged": df_merged,
+        "df_clusters": df_clusters,
+        "X_final": X_final,
+        "article_ids": article_ids,
+        "kmeans_model": kmeans_model,
+        "scaler": scaler,
+    }
 
 #==================================
 # FUNCIONES DE GENERACIÓN DE CANDIDATOS
@@ -902,87 +1074,47 @@ def construir_o_cargar_covisitacion(
         Número mínimo de compras conjuntas para conservar un par.
     """
 
-    cache_path = os.path.join(cache_dir, "covisitation_matrix.parquet")
-    config_path = os.path.join(cache_dir, "covisitation_config.json")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    # Huella de parámetros + datos (mismo patrón que get_or_train_bpr): si
-    # cambia cualquiera de estos, la caché queda invalidada automáticamente.
     current_config = {
         "max_pairs_per_item": max_pairs_per_item,
         "min_co_purchases": min_co_purchases,
-        "num_transactions": len(df_train),
-        "num_unique_customers": df_train["customer_id"].nunique(),
-        "num_unique_articles": df_train["article_id"].nunique(),
+        "data": _data_fingerprint(df_train, ["transaction_id", "customer_id", "article_id", "t_dat"]),
     }
 
+    os.makedirs(cache_dir, exist_ok=True)
+    artifact_dir, cache_key = _versioned_cache_dir(cache_dir, "covisitation", current_config)
+    cache_path = os.path.join(artifact_dir, "covisitation_matrix.parquet")
+    config_path = os.path.join(artifact_dir, "config.json")
+
     if os.path.exists(cache_path) and os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            cached_config = json.load(f)
+        print(f"Covisitacion Cache: cargando version {cache_key} desde disco...")
+        return pd.read_parquet(cache_path)
 
-        if cached_config == current_config:
-            print("✅ Covisitación Cache: Parámetros y datos intactos. Cargando desde disco...")
-            return pd.read_parquet(cache_path)
-        else:
-            print("⚠️ Covisitación Cache: Detectados cambios en datos o parámetros. Reconstruyendo...")
-    else:
-        print("🔍 Covisitación Cache: No se encontró caché. Construyendo desde cero...")
-
+    print(f"Covisitacion Cache: no existe version {cache_key}. Construyendo desde cero...")
     print("Construyendo matriz de co-visitation...")
 
-    # Cada artículo solo cuenta una vez por ticket
-    df_unique = (
-        df_train[
-            ["transaction_id", "article_id"]
-        ]
-        .drop_duplicates()
-    )
-
-    # Todas las combinaciones de artículos dentro del mismo ticket
-    df_pairs = df_unique.merge(
-        df_unique,
-        on="transaction_id",
-        suffixes=("_A", "_B")
-    )
-
-    # Eliminar pares consigo mismos
-    df_pairs = df_pairs[
-        df_pairs.article_id_A != df_pairs.article_id_B
-    ]
-
-    # Número de veces que aparecen juntos
+    df_unique = df_train[["transaction_id", "article_id"]].drop_duplicates()
+    df_pairs = df_unique.merge(df_unique, on="transaction_id", suffixes=("_A", "_B"))
+    df_pairs = df_pairs[df_pairs.article_id_A != df_pairs.article_id_B]
     co_counts = (
         df_pairs
-        .groupby(
-            ["article_id_A", "article_id_B"]
-        )
+        .groupby(["article_id_A", "article_id_B"])
         .size()
         .reset_index(name="co_purchases")
     )
-
-    # Eliminar relaciones muy débiles
-    co_counts = co_counts[
-        co_counts.co_purchases >= min_co_purchases
-    ]
-
-    # Ordenar por frecuencia
+    co_counts = co_counts[co_counts.co_purchases >= min_co_purchases]
     co_counts = co_counts.sort_values(
         ["article_id_A", "co_purchases"],
-        ascending=[True, False]
+        ascending=[True, False],
     )
+    top_covisitation = co_counts.groupby("article_id_A").head(max_pairs_per_item)
 
-    # Conservar únicamente los mejores vecinos
-    top_covisitation = (
-        co_counts
-        .groupby("article_id_A")
-        .head(max_pairs_per_item)
-    )
-
+    os.makedirs(artifact_dir, exist_ok=True)
     top_covisitation.to_parquet(cache_path, index=False)
     with open(config_path, "w") as f:
-        json.dump(current_config, f, indent=4)
+        json.dump(current_config, f, indent=4, default=_json_default)
 
     return top_covisitation
+
 
 def construir_diccionario_covisitacion(df_covisitation):
     """
@@ -1165,10 +1297,85 @@ def generar_candidatos_populares(clientes, df_articles, top_k=20):
     return pd.DataFrame(resultados, columns=["customer_id", "article_id"])
 
 
+def generar_candidatos_hibridos(
+    clientes,
+    user_factors_df,
+    item_factors_df,
+    compras_por_cliente,
+    df_articles,
+    df_train,
+    historial_dict,
+    cov_dict,
+    top_k_bpr=100,
+    top_k_cluster=30,
+    top_k_cov=20,
+    top_k_pop=20,
+):
+    """
+    Ejecuta las estrategias de candidatos y fusiona pares customer/article.
+    df_articles debe incluir article_id, sales_volume y cluster si se activa cluster.
+    """
+    print(f"Generando candidatos hibridos para {len(clientes)} usuarios...")
+    frames = []
+
+    if top_k_bpr > 0:
+        print(" -> BPR")
+        df_bpr = generar_candidatos_bpr_batch(
+            clientes, user_factors_df, item_factors_df, compras_por_cliente, top_k=top_k_bpr
+        )
+        frames.append(df_bpr[["customer_id", "article_id"]])
+    else:
+        df_bpr = pd.DataFrame(columns=["customer_id", "article_id", "bpr_score"])
+
+    if top_k_cluster > 0 and "cluster" in df_articles.columns:
+        print(" -> Cluster")
+        frames.append(
+            generar_candidatos_cluster(
+                clientes, compras_por_cliente, df_articles, df_train, top_k=top_k_cluster
+            )
+        )
+
+    if top_k_cov > 0 and cov_dict:
+        print(" -> Co-visitacion")
+        frames.append(
+            generar_candidatos_covisitacion(
+                clientes, historial_dict, cov_dict, top_k=top_k_cov, usar_log=True
+            )
+        )
+
+    if top_k_pop > 0:
+        print(" -> Populares")
+        frames.append(generar_candidatos_populares(clientes, df_articles, top_k=top_k_pop))
+
+    if not frames:
+        return pd.DataFrame(columns=["customer_id", "article_id", "bpr_score"])
+
+    df_hibrido = (
+        pd.concat(frames, ignore_index=True)
+        .dropna(subset=["customer_id", "article_id"])
+        .drop_duplicates(subset=["customer_id", "article_id"])
+    )
+    if not df_bpr.empty and "bpr_score" in df_bpr.columns:
+        df_hibrido = df_hibrido.merge(
+            df_bpr[["customer_id", "article_id", "bpr_score"]],
+            on=["customer_id", "article_id"],
+            how="left",
+        )
+    else:
+        df_hibrido["bpr_score"] = 0.0
+    df_hibrido["bpr_score"] = df_hibrido["bpr_score"].fillna(0.0)
+
+    print(f"Candidatos hibridos unicos: {len(df_hibrido):,}")
+    return df_hibrido
+
+
 def xgboost_preprocess(
     df_customers, df_products, df_transactions, n_negativos_por_positivo=4, random_state=42,
     bpr_factors=32, bpr_iterations=15, bpr_regularization=0.01,
     historial_dict=None, cov_dict=None,
+    use_hybrid_negatives=False, negative_proportions=None,
+    article_to_cluster=None, cluster_to_articles_sorted=None,
+    bpr_neighbors=None, bpr_neighbors_top_k=50, cache_dir=None,
 ):
     rng = np.random.default_rng(random_state)
 
@@ -1192,7 +1399,7 @@ def xgboost_preprocess(
     #si ya está entrenado, usamos el cache
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     # Definimos la carpeta de caché dentro de backend/
-    CACHE_DIR = os.path.join(BASE_DIR, "bpr_cache")
+    CACHE_DIR = cache_dir or os.path.join(BASE_DIR, "bpr_cache")
     user_factors_df, item_factors_df = get_or_train_bpr(df_transactions, bpr_params,cache_dir=CACHE_DIR)
     # 4. Negative sampling ponderado por popularidad (artículos más vendidos
     #    tienen más probabilidad de ser muestreados como negativos — más realista)
@@ -1210,18 +1417,51 @@ def xgboost_preprocess(
     )
 
     negativos_rows = []
-    for cliente, grupo in positivos.groupby('customer_id'):
-        negativos_rows.extend(
-            generar_negativos_cliente(
-                positivos_cliente=grupo,
-                cliente=cliente,
-                compras_por_cliente=compras_por_cliente,
+    if use_hybrid_negatives:
+        print("Modo negativos hibridos activado.")
+        if bpr_neighbors is None:
+            bpr_neighbors = get_or_precalcular_vecinos_bpr(
+                item_factors_df,
+                top_k=bpr_neighbors_top_k,
+                cache_dir=CACHE_DIR,
+            )
+        if negative_proportions is None:
+            negative_proportions = {"popular": 0.2, "cluster": 0.3, "bpr": 0.3, "cov": 0.2}
+
+        for cliente, grupo in positivos.groupby('customer_id'):
+            positivos_cliente = set(grupo["article_id"])
+            comprados_usuario = compras_por_cliente.get(cliente, set())
+            n_total = len(grupo) * n_negativos_por_positivo
+            negativos_ids = generar_dataset_negativos(
+                n_total=n_total,
+                positivos=positivos_cliente,
+                comprados_usuario=comprados_usuario,
                 todos_los_articulos=todos_los_articulos,
                 prob_muestreo=prob_muestreo,
-                n_negativos_por_positivo=n_negativos_por_positivo,
+                article_to_cluster=article_to_cluster,
+                cluster_to_articles_sorted=cluster_to_articles_sorted,
+                cov_dict=cov_dict,
+                bpr_neighbors=bpr_neighbors,
                 rng=rng,
+                proporciones=negative_proportions,
             )
-        )
+            negativos_rows.extend(
+                {"customer_id": cliente, "article_id": articulo, "label": 0}
+                for articulo in negativos_ids
+            )
+    else:
+        for cliente, grupo in positivos.groupby('customer_id'):
+            negativos_rows.extend(
+                generar_negativos_cliente(
+                    positivos_cliente=grupo,
+                    cliente=cliente,
+                    compras_por_cliente=compras_por_cliente,
+                    todos_los_articulos=todos_los_articulos,
+                    prob_muestreo=prob_muestreo,
+                    n_negativos_por_positivo=n_negativos_por_positivo,
+                    rng=rng,
+                )
+            )
     negativos = pd.DataFrame(negativos_rows)
 
     dataset   = pd.concat([positivos, negativos], ignore_index=True)
@@ -1345,6 +1585,7 @@ def recommend_xgboost_batch(
     model, eval_users, user_encoded_indexed, candidate_pool, candidate_genero,
     generos_por_usuario, user_factors_df, item_factors_df, feature_cols,
     historial_dict=None, cov_dict=None, top_n=12, batch_size=100,
+    candidate_pairs=None,
 ):
     """
     Versión por lotes de recommend_xgboost_for_user, pensada para evaluar
@@ -1369,22 +1610,33 @@ def recommend_xgboost_batch(
     """
     usuarios_validos = [u for u in eval_users if u in user_encoded_indexed.index]
     resultados = {}
+    article_features = candidate_pool.drop_duplicates("article_id")
+    if candidate_pairs is not None:
+        candidate_pairs = candidate_pairs[["customer_id", "article_id"]].drop_duplicates()
 
     for inicio in range(0, len(usuarios_validos), batch_size):
         lote = usuarios_validos[inicio:inicio + batch_size]
 
         # Lo único que varía por usuario: qué candidatos le corresponden.
-        pares_por_usuario = []
-        for u in lote:
-            candidate_pool_u = candidate_pool
-            generos_usuario = generos_por_usuario.get(u, set())
-            if len(generos_usuario) == 1:
-                genero_usuario = next(iter(generos_usuario))
-                pool_filtrado = candidate_pool[candidate_genero == genero_usuario]
-                if not pool_filtrado.empty:
-                    candidate_pool_u = pool_filtrado
-            pares_por_usuario.append(candidate_pool_u.assign(customer_id=u))
-        lote_df = pd.concat(pares_por_usuario, ignore_index=True)
+        if candidate_pairs is None:
+            pares_por_usuario = []
+            for u in lote:
+                candidate_pool_u = candidate_pool
+                generos_usuario = generos_por_usuario.get(u, set())
+                if len(generos_usuario) == 1:
+                    genero_usuario = next(iter(generos_usuario))
+                    pool_filtrado = candidate_pool[candidate_genero == genero_usuario]
+                    if not pool_filtrado.empty:
+                        candidate_pool_u = pool_filtrado
+                pares_por_usuario.append(candidate_pool_u.assign(customer_id=u))
+            lote_df = pd.concat(pares_por_usuario, ignore_index=True)
+        else:
+            lote_df = candidate_pairs[candidate_pairs["customer_id"].isin(lote)].copy()
+            if lote_df.empty:
+                continue
+            lote_df = lote_df.merge(article_features, on="article_id", how="inner")
+            if lote_df.empty:
+                continue
 
         # A partir de aquí, todo vectorizado para el lote completo.
         lote_df = lote_df.merge(
