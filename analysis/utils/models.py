@@ -205,44 +205,6 @@ def clustering_preprocess(df_customers, df_products, df_transactions):
  
     return X_final, article_ids, scaler, df
 
-def clustering_preprocess_old(df_customers, df_products, df_transactions):
-
-    avg_age = (
-        df_transactions.merge(df_customers[['customer_id', 'age']], on='customer_id', how='left')
-        .groupby('article_id')['age']
-        .mean()
-        .reset_index()
-        .rename(columns={'age': 'avg_buyer_age'})
-    )
-
-    max_date = df_transactions['t_dat'].max()
-    tx_features = (
-        df_transactions.groupby('article_id').agg(
-            avg_price=('price', 'mean'),
-            sales_volume=('article_id', 'count'),
-            online_ratio=("is_online", "mean"),
-            recency_days=('t_dat', lambda x: (max_date - x.max()).days),
-        ).reset_index()
-    )
-
-    df = df_products.merge(avg_age, on='article_id', how='left')
-    df = df.merge(tx_features, on='article_id', how='left')
-
-    for col in NUMERIC_FEATURES_CLUSTER:
-        if col in df.columns:
-            df[col] = df[col].fillna(df[col].median())
-
-    available_cat = [c for c in CATEGORICAL_FEATURES_CLUSTER if c in df.columns]
-    encoded = pd.get_dummies(df[available_cat], drop_first=False)
-    X = pd.concat([encoded, df[NUMERIC_FEATURES_CLUSTER]], axis=1).astype(float)
-
-    scaler = StandardScaler()
-    X_final = scaler.fit_transform(X)
-
-    article_ids = df['article_id'].values
-
-    return X_final, article_ids, scaler, df
-
 def compute_user_features(df_customers, df_transactions, df_products):
     #Solo para XGBoost
     """Features de usuario calculadas SOLO con transacciones de train."""
@@ -404,24 +366,6 @@ def inspect_clusters(df_products, df_clusters, numeric_cols=None, category_col='
 
     return df_merged, summary
 
-
-def cluster_products(K=6, datasets=None):
-    numeric_cols = ['avg_buyer_age']
-
-    X_final, article_ids, scaler, df_products = clustering_preprocess(*datasets)
-
-    find_optimal_k(X_final, k_range=range(2, 15))
-
-    df_article_clusters, kmeans_model = fit_product_clustering(X_final, K, article_ids)
-
-    df_merged, summary = inspect_clusters(
-        df_products=df_products,
-        df_clusters=df_article_clusters,
-        numeric_cols=numeric_cols,
-        category_col='product_group_name',
-    )
-
-    return df_article_clusters, kmeans_model, scaler, df_merged, summary, X_final, article_ids, df_products
 
 def get_customer_profile(customer_id, df_transactions, X_df):
     bought = df_transactions.loc[df_transactions['customer_id'] == customer_id, 'article_id'].unique()

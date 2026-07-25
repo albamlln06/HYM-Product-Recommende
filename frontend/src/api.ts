@@ -3,6 +3,10 @@ const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 export interface MetricEntry {
   model: string;
   map12: number;
+  category_hit_rate_test: number;
+  category_hit_rate_general: number;
+  total_hits: number;
+  hit_rate: number;
 }
 
 export interface MetricsResponse {
@@ -50,6 +54,8 @@ export interface MlflowRun {
   status: string;
   start_time: string | null;
   map12: number | null;
+  total_hits: number | null;
+  hit_rate: number | null;
   params: Record<string, string>;
 }
 

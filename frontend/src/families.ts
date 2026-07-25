@@ -7,22 +7,20 @@ export const FAMILY_COLORS: Record<string, string> = {
   Otro: "var(--series-5)",
 };
 
-export const FAMILY_ORDER = ["XGBoost", "Cluster", "Popular", "Random", "Optuna", "Otro"];
-
 // Rampa de tono único (claro -> oscuro) para distinguir, DENTRO de los runs
-// de Optuna, con qué n_customers/candidate_pool_size se corrió cada trial:
-// una búsqueda con una muestra distinta no es comparable a otra, así que
-// conviene verlo de un vistazo en el color en vez de solo en el tooltip.
+// de Optuna, qué estudio corrió cada trial: dos estudios pueden usar
+// candidate pools de evaluación distintos (use_hybrid_candidates) y por
+// tanto no son comparables entre sí, así que conviene verlo de un vistazo en
+// el color en vez de solo en el tooltip.
 const OPTUNA_SHADES = ["var(--palette-amber-1)", "var(--palette-amber-2)", "var(--palette-amber-3)", "var(--palette-amber-4)"];
 
-// Hash estable (no depende de qué otras combinaciones haya en pantalla, así
-// una combinación siempre sale con el mismo color aunque cambie el resto de
-// runs cargados) para elegir el tono dentro de OPTUNA_SHADES.
-function hashOptunaConfig(nCustomers: string, poolSize: string): number {
-  const s = `${nCustomers}:${poolSize}`;
+// Hash estable (no depende de qué otros estudios haya en pantalla, así un
+// estudio siempre sale con el mismo color aunque cambie el resto de runs
+// cargados) para elegir el tono dentro de OPTUNA_SHADES.
+function hashOptunaConfig(key: string): number {
   let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h * 31 + s.charCodeAt(i)) | 0;
+  for (let i = 0; i < key.length; i++) {
+    h = (h * 31 + key.charCodeAt(i)) | 0;
   }
   return Math.abs(h);
 }
@@ -36,25 +34,30 @@ export interface RunGroup {
 /**
  * Agrupa un run para pintarlo/etiquetarlo: los runs normales usan su family
  * tal cual (color fijo de FAMILY_COLORS); los runs de Optuna se subdividen
- * por la combinación de n_customers/candidate_pool_size con la que se
- * corrió la búsqueda (params logueados por optuna_search.py), cada una con
- * su propio tono de la rampa ámbar y su propia etiqueta de leyenda.
+ * por optuna_study (params logueados por optuna_search.py), cada uno con su
+ * propio tono de la rampa ámbar y su propia etiqueta de leyenda. Se agrupa
+ * por estudio (no por n_customers/candidate_pool_size) porque lo que de
+ * verdad hace a dos estudios NO comparables es si tunearon con el mismo
+ * candidate pool de evaluación (use_hybrid_candidates) que train.py — la
+ * etiqueta lo deja explícito.
  */
 export function runGroup(run: { family: string; params: Record<string, string> }): RunGroup {
   if (run.family !== "Optuna") {
     return { key: run.family, label: run.family, color: FAMILY_COLORS[run.family] ?? FAMILY_COLORS.Otro };
   }
 
-  const nCustomers = run.params.n_customers;
-  const poolSize = run.params.candidate_pool_size;
-  if (!nCustomers || !poolSize) {
+  const study = run.params.optuna_study;
+  if (!study) {
     return { key: "Optuna", label: "Optuna", color: FAMILY_COLORS.Optuna };
   }
 
-  const shade = OPTUNA_SHADES[hashOptunaConfig(nCustomers, poolSize) % OPTUNA_SHADES.length];
+  const nCustomers = run.params.n_customers ?? "?";
+  const hybridCandidates = run.params.use_hybrid_candidates === "True";
+  const candidatesTag = hybridCandidates ? "candidatos híbridos" : "candidatos por popularidad";
+  const shade = OPTUNA_SHADES[hashOptunaConfig(study) % OPTUNA_SHADES.length];
   return {
-    key: `Optuna:${nCustomers}:${poolSize}`,
-    label: `Optuna · ${nCustomers} clientes / ${poolSize} candidatos`,
+    key: `Optuna:${study}`,
+    label: `Optuna · ${study} (${nCustomers} clientes, ${candidatesTag})`,
     color: shade,
   };
 }

@@ -82,13 +82,6 @@ def transactions_group(df_transactions):
     )
     return df_transactions
 
-def filter_customers_by_min_orders(df_transactions, n):
-    print(df_transactions.describe())
-    print(df_transactions.info())
-    orders_per_customer = df_transactions.groupby('customer_id')['transaction_id'].nunique()
-    active_customers = orders_per_customer[orders_per_customer > n].index
-    return df_transactions[df_transactions['customer_id'].isin(active_customers)]
-
 def filter_customers_by_activity(
     df_transactions,
     min_purchases: int = 3,

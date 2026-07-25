@@ -53,11 +53,22 @@ RANDOM_STATE = 42
 K_CLUSTERS = 10
 
 # --- Hiperparámetros del modelo XGBoost ---
+# Valores del mejor trial encontrado por optuna_search.py (estudio
+# "xgboost_hpo", trial 179 de 180, MAP@12=0.024188 sobre N_CUSTOMERS=1000 —
+# misma muestra que usa este script, así que es comparable). candidate_pool_size,
+# BPR y candidate_top_k_* NO se tocan: en la búsqueda se dejaron fijos, no los
+# exploró Optuna.
 CANDIDATE_POOL_SIZE = 50000  # nº de artículos usados para el entrenamiento
-N_NEGATIVOS_POR_POSITIVO = 8
-XGB_N_ESTIMATORS = 500
-XGB_MAX_DEPTH = 4
-XGB_LEARNING_RATE = 0.06
+N_NEGATIVOS_POR_POSITIVO = 10
+XGB_N_ESTIMATORS = 550
+XGB_MAX_DEPTH = 7
+XGB_LEARNING_RATE = 0.09057400301148144
+XGB_REG_LAMBDA = 0.0068033325275598956
+XGB_REG_ALPHA = 0.0017096436589603633
+XGB_SUBSAMPLE = 0.7474002782840928
+XGB_COLSAMPLE_BYTREE = 0.6006997087236939
+XGB_MIN_CHILD_WEIGHT = 8
+XGB_GAMMA = 0.7588223352482466
 
 # --- Hiperparámetros del modelo BPR (feature bpr_score de XGBoost) ---
 # Barrido rápido (BPR evaluado solo, sin XGBoost) con N_CUSTOMERS=600: subir
@@ -71,9 +82,20 @@ BPR_REGULARIZATION = 0.05
 # --- Interruptores modulares del pipeline ---
 USE_CACHED_CLUSTERING = True
 USE_HYBRID_NEGATIVES = True
-USE_HYBRID_CANDIDATES = True
+# Puesto a False temporalmente: los hiperparámetros XGB_* actuales vienen del
+# mejor trial de optuna_search.py, que tuneó SIN candidatos híbridos
+# (use_hybrid_candidates nunca se pasaba ahí, así que caía en su default
+# False). Evaluarlos aquí con True mezclaba dos regímenes de candidate pool
+# distintos y el MAP@12 se desplomó (0.0131 -> 0.0041). Este run sirve para
+# confirmar que sí funcionan bien en el régimen para el que se tunearon.
+USE_HYBRID_CANDIDATES = False
 
-NEGATIVE_PROPORTIONS = {"popular": 0.2, "cluster": 0.3, "bpr": 0.3, "cov": 0.2}
+NEGATIVE_PROPORTIONS = {
+    "popular": 0.38881769647337966,
+    "cluster": 0.2867407826021783,
+    "bpr": 0.15499201744478697,
+    "cov": 0.1694495034796551,
+}
 BPR_NEIGHBORS_TOP_K = 50
 
 TOP_K_CANDIDATES_BPR = 100
@@ -625,6 +647,8 @@ def main():
         df_customers, df_products, df_train, eval_users, actual,
         article_to_category, actual_categories_test, categorias_compradas_general,
         n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH, learning_rate=XGB_LEARNING_RATE,
+        reg_lambda=XGB_REG_LAMBDA, reg_alpha=XGB_REG_ALPHA, subsample=XGB_SUBSAMPLE,
+        colsample_bytree=XGB_COLSAMPLE_BYTREE, min_child_weight=XGB_MIN_CHILD_WEIGHT, gamma=XGB_GAMMA,
         n_negativos_por_positivo=N_NEGATIVOS_POR_POSITIVO, candidate_pool_size=CANDIDATE_POOL_SIZE,
         bpr_factors=BPR_FACTORS, bpr_iterations=BPR_ITERATIONS, bpr_regularization=BPR_REGULARIZATION,
         k_eval=K_EVAL, random_state=RANDOM_STATE, extra_params=extra_params_datos,

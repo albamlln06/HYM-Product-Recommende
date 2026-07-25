@@ -181,6 +181,8 @@ def get_mlflow_runs():
         map12 = row.get("metrics.map12")
         cat_hit_test = row.get("metrics.category_hit_rate_test")
         cat_hit_general = row.get("metrics.category_hit_rate_general")
+        total_hits = row.get("metrics.total_hits")
+        hit_rate = row.get("metrics.hit_rate")
         start_time = row.get("start_time")
         runs.append({
             "run_id": row["run_id"],
@@ -191,6 +193,8 @@ def get_mlflow_runs():
             "map12": float(map12) if pd.notna(map12) else None,
             "category_hit_rate_test": float(cat_hit_test) if pd.notna(cat_hit_test) else None,
             "category_hit_rate_general": float(cat_hit_general) if pd.notna(cat_hit_general) else None,
+            "total_hits": int(total_hits) if pd.notna(total_hits) else None,
+            "hit_rate": float(hit_rate) if pd.notna(hit_rate) else None,
             "params": {
                 c.removeprefix("params."): row[c]
                 for c in param_cols

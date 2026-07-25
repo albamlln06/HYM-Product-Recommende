@@ -21,6 +21,16 @@ train.py (leave_one_out_split, entrenar_modelo_xgboost, etc.) pero:
     experimento que train.py, con params optuna_study/optuna_trial) para
     poder comparar todos los trials en `mlflow ui`.
 
+--use-hybrid-candidates (activado por defecto): si el candidate pool de
+    evaluación coincide o no con el de train.py (USE_HYBRID_CANDIDATES=True,
+    candidatos personalizados por usuario vía BPR/cluster/covisitación/
+    populares) importa MUCHO para qué hiperparámetros salen "mejores" — un
+    trial tuneado contra un pool genérico de más-vendidos (--no-hybrid-
+    candidates) puede rankear fatal contra el pool personalizado real de
+    train.py, y viceversa. Por eso train.py, EvolutionPanel (frontend) y este
+    flag están todos alineados: usa el mismo valor aquí que el
+    USE_HYBRID_CANDIDATES con el que vayas a correr train.py después.
+
 Como usa una muestra reducida, el MAP@12 de cada trial NO es directamente
 comparable al de un run completo de train.py: sirve para RANKEAR
 combinaciones de hiperparámetros entre sí, no como métrica final. Una vez
@@ -34,6 +44,7 @@ Uso:
     python backend/optuna_search.py
     python backend/optuna_search.py --n-trials 50
     python backend/optuna_search.py --study-name mi_busqueda --n-trials 20
+    python backend/optuna_search.py --study-name xgboost_hpo_no_hybrid --no-hybrid-candidates
 """
 import argparse
 import json
@@ -64,8 +75,8 @@ from train import (
 )
 
 # --- Muestra reducida solo para la búsqueda (más rápida que la de train.py) ---
-SEARCH_N_CUSTOMERS = 1000
-SEARCH_CANDIDATE_POOL_SIZE = 30000
+SEARCH_N_CUSTOMERS = 3000
+SEARCH_CANDIDATE_POOL_SIZE = 40000
 # Caché propia (distinta de backend/bpr_cache que usa train.py) para no
 # invalidar entre sí las cachés de co-visitación al alternar entre este
 # script y train.py con tamaños de muestra distintos.
@@ -114,12 +125,16 @@ def cargar_datos_busqueda():
         df_customers=df_customers, df_products=df_products, df_train=df_train,
         eval_users=eval_users, actual=actual, historial_dict=historial_dict, cov_dict=cov_dict,
         article_to_cluster=article_to_cluster, cluster_to_articles_sorted=cluster_to_articles_sorted,
+        # df_merged (article_id + cluster + features) también sirve como
+        # df_articles_for_candidates para generar_candidatos_hibridos cuando
+        # --use-hybrid-candidates está activo.
+        df_articles_for_candidates=cluster_artifacts["df_merged"],
         article_to_category=article_to_category, actual_categories_test=actual_categories_test,
         categorias_compradas_general=categorias_compradas_general,
     )
 
 
-def make_objective(datos, study_name):
+def make_objective(datos, study_name, use_hybrid_candidates):
     def objective(trial):
         params = dict(
             n_estimators=trial.suggest_int("n_estimators", 100, 600, step=50),
@@ -168,6 +183,12 @@ def make_objective(datos, study_name):
             article_to_cluster=datos["article_to_cluster"],
             cluster_to_articles_sorted=datos["cluster_to_articles_sorted"],
             bpr_neighbors_top_k=BPR_NEIGHBORS_TOP_K,
+            # Debe coincidir con el USE_HYBRID_CANDIDATES con el que se vaya a
+            # correr train.py después: si no, los hiperparámetros se tunean
+            # para un candidate pool en la búsqueda y se aplican sobre otro
+            # distinto en producción (ver comentario del módulo).
+            use_hybrid_candidates=use_hybrid_candidates,
+            df_articles_for_candidates=datos["df_articles_for_candidates"],
             **params,
         )
 
@@ -182,6 +203,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n-trials", type=int, default=30, help="Número de combinaciones a probar")
     parser.add_argument("--study-name", type=str, default="xgboost_hpo", help="Nombre del estudio de Optuna")
+    parser.add_argument(
+        "--use-hybrid-candidates", dest="use_hybrid_candidates", action="store_true", default=True,
+        help="Candidatos personalizados por usuario (BPR/cluster/covisitación/populares), igual que train.py. Activado por defecto.",
+    )
+    parser.add_argument(
+        "--no-hybrid-candidates", dest="use_hybrid_candidates", action="store_false",
+        help="Evalúa contra el candidate pool genérico (top-N por popularidad). Úsalo solo si vas a correr train.py también con USE_HYBRID_CANDIDATES=False.",
+    )
     args = parser.parse_args()
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -196,7 +225,10 @@ def main():
         sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE),
         load_if_exists=True,
     )
-    study.optimize(make_objective(datos, args.study_name), n_trials=args.n_trials)
+    study.optimize(
+        make_objective(datos, args.study_name, args.use_hybrid_candidates),
+        n_trials=args.n_trials,
+    )
 
     print(f"\nMejor MAP@12 (muestra de búsqueda, {SEARCH_N_CUSTOMERS} clientes): {study.best_value:.4f}")
     print(f"Mejores hiperparámetros:\n{json.dumps(study.best_params, indent=2)}")
