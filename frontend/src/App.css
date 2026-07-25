@@ -6,12 +6,19 @@
   --palette-lightblue: #6fa8dc;
   --palette-teal: #0b3b47;
   --palette-amber: #c17d17;
-  /* Rampa secuencial (mismo tono, claro->oscuro) para distinguir combinaciones
-     de n_customers/candidate_pool_size dentro de los runs de Optuna. */
-  --palette-amber-1: #d99b32;
-  --palette-amber-2: #c17d17;
-  --palette-amber-3: #a3630c;
-  --palette-amber-4: #824d05;
+  /* Paleta categórica (no una rampa de un solo tono) para distinguir estudios
+     de Optuna entre sí en el gráfico de progreso: validada con el script de
+     la skill de dataviz (ΔE adyacente mínimo 24.2, muy por encima del umbral
+     de 12), sin usar el azul de --palette-blue (ya es "XGBoost" en el otro
+     gráfico). Con la rampa ámbar anterior (4 tonos del mismo color) la
+     separación era de solo ΔE~10, demasiado débil para distinguir estudios. */
+  --palette-optuna-1: #1baf7a;
+  --palette-optuna-2: #eda100;
+  --palette-optuna-3: #008300;
+  --palette-optuna-4: #4a3aa7;
+  --palette-optuna-5: #e34948;
+  --palette-optuna-6: #e87ba4;
+  --palette-optuna-7: #eb6834;
 
   --brand-dark: var(--palette-teal);
   --brand-primary: var(--palette-blue);

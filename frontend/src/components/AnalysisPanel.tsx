@@ -3,10 +3,10 @@ import CustomerPanel from "./CustomerPanel";
 import MetricsPanel from "./MetricsPanel";
 import EvolutionPanel from "./EvolutionPanel";
 
-type Tab = "customer" | "metrics" | "evolution";
+type Tab = "metrics" | "evolution" | "customer";
 
 export default function AnalysisPanel({ onSwitchToStore }: { onSwitchToStore: () => void }) {
-  const [tab, setTab] = useState<Tab>("customer");
+  const [tab, setTab] = useState<Tab>("metrics");
 
   return (
     <div className="app">
@@ -21,12 +21,6 @@ export default function AnalysisPanel({ onSwitchToStore }: { onSwitchToStore: ()
         <div className="analysis-nav-row">
           <nav className="tabs">
             <button
-              className={tab === "customer" ? "tab active" : "tab"}
-              onClick={() => setTab("customer")}
-            >
-              Recomendaciones por cliente
-            </button>
-            <button
               className={tab === "metrics" ? "tab active" : "tab"}
               onClick={() => setTab("metrics")}
             >
@@ -38,6 +32,12 @@ export default function AnalysisPanel({ onSwitchToStore }: { onSwitchToStore: ()
             >
               Evolución de modelos
             </button>
+            <button
+              className={tab === "customer" ? "tab active" : "tab"}
+              onClick={() => setTab("customer")}
+            >
+              Recomendaciones por cliente
+            </button>
           </nav>
           <button className="refresh-button" onClick={onSwitchToStore}>
             ← Volver a la tienda
@@ -46,9 +46,9 @@ export default function AnalysisPanel({ onSwitchToStore }: { onSwitchToStore: ()
       </header>
 
       <main>
-        {tab === "customer" && <CustomerPanel />}
         {tab === "metrics" && <MetricsPanel />}
         {tab === "evolution" && <EvolutionPanel />}
+        {tab === "customer" && <CustomerPanel />}
       </main>
     </div>
   );

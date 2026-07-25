@@ -7,12 +7,20 @@ export const FAMILY_COLORS: Record<string, string> = {
   Otro: "var(--series-5)",
 };
 
-// Rampa de tono único (claro -> oscuro) para distinguir, DENTRO de los runs
-// de Optuna, qué estudio corrió cada trial: dos estudios pueden usar
-// candidate pools de evaluación distintos (use_hybrid_candidates) y por
+// Paleta categórica (no una rampa de un solo tono) para distinguir, DENTRO
+// de los runs de Optuna, qué estudio corrió cada trial: dos estudios pueden
+// usar candidate pools de evaluación distintos (use_hybrid_candidates) y por
 // tanto no son comparables entre sí, así que conviene verlo de un vistazo en
-// el color en vez de solo en el tooltip.
-const OPTUNA_SHADES = ["var(--palette-amber-1)", "var(--palette-amber-2)", "var(--palette-amber-3)", "var(--palette-amber-4)"];
+// el color en vez de solo en el tooltip. Validada con la skill de dataviz.
+const OPTUNA_SHADES = [
+  "var(--palette-optuna-1)",
+  "var(--palette-optuna-2)",
+  "var(--palette-optuna-3)",
+  "var(--palette-optuna-4)",
+  "var(--palette-optuna-5)",
+  "var(--palette-optuna-6)",
+  "var(--palette-optuna-7)",
+];
 
 // Hash estable (no depende de qué otros estudios haya en pantalla, así un
 // estudio siempre sale con el mismo color aunque cambie el resto de runs
