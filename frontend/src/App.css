@@ -493,6 +493,43 @@ h3 {
   max-width: 360px;
 }
 
+.best-run-card {
+  position: relative;
+  max-width: 420px;
+}
+
+.best-run-tag {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(52, 199, 89, 0.15);
+  color: #248a3d;
+}
+
+.best-run-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.best-run-map {
+  margin-top: 10px;
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.best-run-params {
+  margin-top: 8px;
+}
+
 .home-search-button {
   padding: 13px 22px;
   font-size: 14px;

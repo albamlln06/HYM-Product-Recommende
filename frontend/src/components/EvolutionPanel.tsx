@@ -10,7 +10,6 @@ import {
 } from "recharts";
 import { getMlflowRuns, type MlflowRun } from "../api";
 import { runGroup, type RunGroup } from "../families";
-import ComparisonPanel from "./ComparisonPanel";
 
 const REFRESH_MS = 10_000;
 
@@ -104,10 +103,16 @@ export default function EvolutionPanel() {
     [chartData, hiddenGroups]
   );
 
-  const runsDesc = useMemo(
-    () => [...visibleChartData].reverse(),
-    [visibleChartData]
-  );
+  // Mejor run (mayor MAP@12) entre los actualmente visibles, para que la
+  // tarjeta coincida siempre con lo que se ve en el gráfico.
+  const bestRun = useMemo(() => {
+    let best: (typeof visibleChartData)[number] | null = null;
+    for (const r of visibleChartData) {
+      if (r.map12 === null) continue;
+      if (!best || best.map12 === null || r.map12 > best.map12) best = r;
+    }
+    return best;
+  }, [visibleChartData]);
 
   return (
     <section>
@@ -129,12 +134,8 @@ export default function EvolutionPanel() {
         <p className="muted">Aún no hay runs registrados en MLflow.</p>
       )}
 
-      {runs.length > 0 && <ComparisonPanel runs={runs} />}
-
       {runs.length > 0 && (
         <>
-          <h3>Historial completo de runs</h3>
-          <p className="muted">Haz clic en un grupo para ocultarlo/mostrarlo en el gráfico y la tabla.</p>
           <div className="legend">
             {groupsPresent.map((g) => {
               const off = hiddenGroups.has(g.key);
@@ -189,30 +190,21 @@ export default function EvolutionPanel() {
             </ResponsiveContainer>
           </div>
 
-          <table className="runs-table">
-            <thead>
-              <tr>
-                <th>Run</th>
-                <th>Familia</th>
-                <th>Estado</th>
-                <th>Fecha</th>
-                <th>MAP@12</th>
-                <th>Parámetros</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runsDesc.map((r) => (
-                <tr key={r.run_id}>
-                  <td>{r.run_name}</td>
-                  <td>{r.group.label}</td>
-                  <td><span className={`status-badge ${r.status}`}>{r.status}</span></td>
-                  <td className="muted">{formatTimestamp(r.start_time)}</td>
-                  <td className="tabular">{r.map12 !== null ? r.map12.toFixed(4) : "—"}</td>
-                  <td className="params-cell">{formatParams(r.params)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {bestRun && (
+            <div className="chart-card best-run-card">
+              <span className="best-run-tag">Mejor run</span>
+              <div className="best-run-header">
+                <span className="legend-dot" style={{ background: bestRun.group.color }} />
+                <strong>{bestRun.run_name}</strong>
+                <span className={`status-badge ${bestRun.status}`}>{bestRun.status}</span>
+              </div>
+              <div className="muted">{bestRun.group.label} · {formatTimestamp(bestRun.start_time)}</div>
+              <div className="best-run-map">MAP@12 {bestRun.map12!.toFixed(4)}</div>
+              {Object.keys(bestRun.params).length > 0 && (
+                <div className="muted best-run-params">{formatParams(bestRun.params)}</div>
+              )}
+            </div>
+          )}
         </>
       )}
     </section>
