@@ -77,6 +77,7 @@ mlartifacts/
 # Optuna study + search-only caches
 optuna_study.db
 backend/bpr_cache_search/
+backend/cluster_cache_search/
 
 # Secrets
 *.pem

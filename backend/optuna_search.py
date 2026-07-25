@@ -52,6 +52,8 @@ from train import (
     BPR_FACTORS,
     BPR_ITERATIONS,
     BPR_REGULARIZATION,
+    BPR_NEIGHBORS_TOP_K,
+    K_CLUSTERS,
     MLFLOW_EXPERIMENT_NAME,
     MLFLOW_TRACKING_URI,
     preprocess,
@@ -68,6 +70,8 @@ SEARCH_CANDIDATE_POOL_SIZE = 30000
 # invalidar entre sí las cachés de co-visitación al alternar entre este
 # script y train.py con tamaños de muestra distintos.
 SEARCH_COVISITATION_CACHE_DIR = str(BASE_DIR / "backend" / "bpr_cache_search")
+# Idem para la caché de clustering (usada para los negativos por cluster).
+SEARCH_CLUSTERING_CACHE_DIR = str(BASE_DIR / "backend" / "cluster_cache_search")
 
 OPTUNA_STORAGE = f"sqlite:///{Path(__file__).resolve().parent / 'optuna_study.db'}"
 
@@ -90,12 +94,26 @@ def cargar_datos_busqueda():
     cov_dict = models.construir_diccionario_covisitacion(df_cov)
     del df_cov
 
+    # Clustering (KMeans sobre atributos de producto), necesario para poder
+    # generar negativos "duros" por cluster (ver generar_negativos_cluster en
+    # models.py): un negativo del mismo cluster que un artículo comprado es
+    # mucho más informativo para XGBoost que uno elegido al azar.
+    cluster_artifacts = models.construir_o_cargar_clustering(
+        df_customers, df_products, df_train,
+        k_clusters=K_CLUSTERS,
+        cache_dir=SEARCH_CLUSTERING_CACHE_DIR,
+    )
+    article_to_cluster, cluster_to_articles_sorted = models.build_cluster_negative_artifacts(
+        cluster_artifacts["df_merged"]
+    )
+
     article_to_category, actual_categories_test, categorias_compradas_general = build_category_ground_truth(
         df_products, df_train, eval_users, actual,
     )
     return dict(
         df_customers=df_customers, df_products=df_products, df_train=df_train,
         eval_users=eval_users, actual=actual, historial_dict=historial_dict, cov_dict=cov_dict,
+        article_to_cluster=article_to_cluster, cluster_to_articles_sorted=cluster_to_articles_sorted,
         article_to_category=article_to_category, actual_categories_test=actual_categories_test,
         categorias_compradas_general=categorias_compradas_general,
     )
@@ -116,6 +134,20 @@ def make_objective(datos, study_name):
             n_negativos_por_positivo=trial.suggest_int("n_negativos_por_positivo", 4, 12),
         )
 
+        # Proporciones de negativos "duros" (cluster/bpr/cov): lo que sobra
+        # hasta 1.0 se rellena con negativos "fáciles" por popularidad. Deja
+        # que Optuna decida cuánto pesa cada estrategia de hard negatives en
+        # vez de usar el reparto fijo de NEGATIVE_PROPORTIONS de train.py.
+        prop_cluster = trial.suggest_float("neg_prop_cluster", 0.0, 0.5)
+        prop_bpr = trial.suggest_float("neg_prop_bpr", 0.0, 0.5)
+        prop_cov = trial.suggest_float("neg_prop_cov", 0.0, 0.3)
+        negative_proportions = {
+            "popular": max(0.0, 1.0 - prop_cluster - prop_bpr - prop_cov),
+            "cluster": prop_cluster,
+            "bpr": prop_bpr,
+            "cov": prop_cov,
+        }
+
         resultado = entrenar_modelo_xgboost(
             datos["df_customers"], datos["df_products"], datos["df_train"],
             datos["eval_users"], datos["actual"],
@@ -131,6 +163,11 @@ def make_objective(datos, study_name):
                 "search_run": True,
             },
             historial_dict=datos["historial_dict"], cov_dict=datos["cov_dict"],
+            use_hybrid_negatives=True,
+            negative_proportions=negative_proportions,
+            article_to_cluster=datos["article_to_cluster"],
+            cluster_to_articles_sorted=datos["cluster_to_articles_sorted"],
+            bpr_neighbors_top_k=BPR_NEIGHBORS_TOP_K,
             **params,
         )
 
