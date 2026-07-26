@@ -162,6 +162,13 @@ def make_objective(datos, study_name, use_hybrid_candidates):
             "bpr": prop_bpr,
             "cov": prop_cov,
         }
+        cand_params = {}
+        if use_hybrid_candidates:
+            # Ampliamos los rangos según la naturaleza de cada técnica
+            cand_params["candidate_top_k_bpr"] = trial.suggest_int("cand_top_k_bpr", 100, 400, step=10)
+            cand_params["candidate_top_k_cluster"] = trial.suggest_int("cand_top_k_cluster", 50, 200, step=5)
+            cand_params["candidate_top_k_cov"] = trial.suggest_int("cand_top_k_cov", 50, 150, step=5)
+            cand_params["candidate_top_k_pop"] = trial.suggest_int("cand_top_k_pop", 100, 500, step=5)
 
         resultado = entrenar_modelo_xgboost(
             datos["df_customers"], datos["df_products"], datos["df_train"],
@@ -190,10 +197,15 @@ def make_objective(datos, study_name, use_hybrid_candidates):
             use_hybrid_candidates=use_hybrid_candidates,
             df_articles_for_candidates=datos["df_articles_for_candidates"],
             **params,
+            **cand_params,
         )
 
-        trial.set_user_attr("category_hit_rate_test", resultado["category_hit_rate_test"])
-        trial.set_user_attr("hit_rate", resultado["hit_rate"])
+        trial.set_user_attr("recall_candidatos", resultado["recall_cand"])
+        trial.set_user_attr("hit_rate_final", resultado["hit_rate"])
+        trial.set_user_attr("total_hits", resultado["total_hits"])
+        trial.set_user_attr("cat_hit_test", resultado["category_hit_rate_test"])
+        trial.set_user_attr("cat_hit_general", resultado["category_hit_rate_general"])
+            
         return resultado["map12"]
 
     return objective

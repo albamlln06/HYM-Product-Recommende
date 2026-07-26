@@ -197,6 +197,35 @@ def registrar_metricas_aciertos(actual, predicciones, k_eval):
     mlflow.log_metric("hit_rate", rate)
     return total, rate
 
+def calcular_recall_candidatos(df_inferencia, actual_dict):
+    """
+    Calcula el Recall del pool de candidatos: 
+    ¿Qué porcentaje de los artículos comprados realmente estaban en el pool antes de pasar por XGBoost?
+    
+    - df_inferencia: DataFrame que contiene al menos 'customer_id' y 'article_id' de los candidatos.
+    - actual_dict: Diccionario {customer_id: [lista_de_articulos_comprados_en_test]}
+    """
+    hits_candidatos = 0
+    total_comprados_test = 0
+
+    # Agrupamos los candidatos por cliente en Sets para que la búsqueda sea instantánea
+    candidatos_por_cliente = df_inferencia.groupby('customer_id')['article_id'].apply(set).to_dict()
+
+    for customer, comprados_reales in actual_dict.items():
+        comprados_set = set(comprados_reales)
+        if not comprados_set:
+            continue
+
+        candidatos_cliente = candidatos_por_cliente.get(customer, set())
+
+        # Intersección: ¿cuántos de los comprados ESTABAN en la lista de candidatos?
+        hits_candidatos += len(comprados_set.intersection(candidatos_cliente))
+        total_comprados_test += len(comprados_set)
+
+    # Calculamos el porcentaje (Recall)
+    recall_candidatos = hits_candidatos / total_comprados_test if total_comprados_test > 0 else 0.0
+    
+    return recall_candidatos, hits_candidatos, total_comprados_test
 
 def entrenar_modelo_random(
     df_products, eval_users, actual, article_to_category, actual_categories_test, categorias_compradas_general,
@@ -515,6 +544,12 @@ def entrenar_modelo_xgboost(
             )
             candidate_pool = article_encoded
             candidate_genero = candidate_pool["article_id"].map(article_to_gender)
+
+        recall_cand, hits_cand, total_reales = calcular_recall_candidatos(candidate_pairs, actual)
+    
+        # Imprimes el resultado para verlo en consola al instante
+        print(f"Recall de Candidatos: {recall_cand:.4f} ({hits_cand} encontrados de {total_reales} compras reales)")
+
         print('Iniciando de predicciones')
         #Hay que aplicar estrategias: Los que tengan mayor ranking bpr, los más vendidos del último mes, más populares en general, recompras
         #artículos dentro del cluster de los que compraron, etc
@@ -556,6 +591,7 @@ def entrenar_modelo_xgboost(
         "category_hit_rate_general": cat_hit_general,
         "total_hits": total_hits,
         "hit_rate": hit_rate,
+        "recall_cand": recall_cand,
     }
     return resultado
 
