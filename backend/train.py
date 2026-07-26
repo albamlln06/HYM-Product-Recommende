@@ -545,7 +545,8 @@ def entrenar_modelo_xgboost(
             candidate_pool = article_encoded
             candidate_genero = candidate_pool["article_id"].map(article_to_gender)
 
-        recall_cand, hits_cand, total_reales = calcular_recall_candidatos(candidate_pairs, actual)
+        actual_dict = dict(zip(eval_users, actual))
+        recall_cand, hits_cand, total_reales = calcular_recall_candidatos(candidate_pairs, actual_dict)
     
         # Imprimes el resultado para verlo en consola al instante
         print(f"Recall de Candidatos: {recall_cand:.4f} ({hits_cand} encontrados de {total_reales} compras reales)")
