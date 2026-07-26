@@ -588,6 +588,51 @@ h3 {
   margin-top: 8px;
 }
 
+.stat-tile-card {
+  max-width: 640px;
+}
+
+/* Tag ámbar (no verde) para dejar claro que es un trial de búsqueda, no un
+   run real validado como el de .best-run-tag. */
+.stat-tile-card .best-run-tag {
+  background: rgba(193, 125, 23, 0.15);
+  color: var(--palette-amber);
+}
+
+.stat-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 24px;
+  margin: 20px 0 4px;
+  text-align: center;
+}
+
+.stat-tile-value {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+
+.stat-tile-label {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.stat-tile-desc {
+  margin: 4px auto 0;
+  max-width: 220px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.stat-tile-footer {
+  margin-top: 16px;
+  text-align: center;
+}
+
 .home-search-button {
   padding: 13px 22px;
   font-size: 14px;

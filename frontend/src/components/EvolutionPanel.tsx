@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
-  Line,
-  LineChart,
   Scatter,
   ScatterChart,
   Tooltip,
@@ -16,6 +14,7 @@ import { runGroup, type RunGroup } from "../families";
 const REFRESH_MS = 10_000;
 
 type GroupedRun = MlflowRun & { idx: number; group: RunGroup };
+type OptunaRun = GroupedRun & { trial: number };
 
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "—";
@@ -29,6 +28,35 @@ function formatParams(params: Record<string, string>): string {
   return Object.entries(params)
     .map(([k, v]) => `${k}=${v}`)
     .join(" · ");
+}
+
+// Coloca cada run en el eje X por su familia (una "columna" por grupo) en vez
+// de por orden de ejecución, con un pequeño jitter horizontal dentro de la
+// columna para que los puntos no se apilen exactamente uno sobre otro. Así
+// se ve de un vistazo qué familia rinde mejor, en vez de tener que rastrear
+// puntos dispersos a lo largo de una línea de tiempo.
+function assignCategoryX<T extends { group: RunGroup }>(
+  runs: T[],
+  groups: RunGroup[]
+): (T & { catX: number })[] {
+  const indexByKey = new Map(groups.map((g, i) => [g.key, i]));
+  const byGroup = new Map<string, T[]>();
+  for (const r of runs) {
+    if (!byGroup.has(r.group.key)) byGroup.set(r.group.key, []);
+    byGroup.get(r.group.key)!.push(r);
+  }
+
+  const out: (T & { catX: number })[] = [];
+  for (const [key, groupRuns] of byGroup) {
+    const base = indexByKey.get(key) ?? 0;
+    const n = groupRuns.length;
+    const step = n > 1 ? Math.min(0.32 / (n - 1), 0.12) : 0;
+    groupRuns.forEach((r, i) => {
+      const jitter = n > 1 ? (i - (n - 1) / 2) * step : 0;
+      out.push({ ...r, catX: base + jitter });
+    });
+  }
+  return out;
 }
 
 interface TooltipPayloadItem {
@@ -50,79 +78,6 @@ function RunTooltip({ active, payload }: { active?: boolean; payload?: TooltipPa
       {Object.keys(run.params).length > 0 && (
         <div className="muted" style={{ marginTop: 4 }}>{formatParams(run.params)}</div>
       )}
-    </div>
-  );
-}
-
-// Fila ancha {trial, [groupKey]: mejor MAP@12 acumulado hasta ese trial} para
-// poder dibujar una línea por estudio de Optuna en un único eje X compartido
-// (el patrón "wide format" es el que mejor soporta recharts para varias
-// líneas con tooltip/crosshair compartido).
-function buildOptunaProgressRows(runs: GroupedRun[], groups: RunGroup[]): Record<string, number | null>[] {
-  const runsByGroup = new Map<string, GroupedRun[]>();
-  for (const r of runs) {
-    if (!runsByGroup.has(r.group.key)) runsByGroup.set(r.group.key, []);
-    runsByGroup.get(r.group.key)!.push(r);
-  }
-
-  const bestAtTrial = new Map<string, Map<number, number>>();
-  let maxTrial = 0;
-  for (const g of groups) {
-    const sorted = (runsByGroup.get(g.key) ?? [])
-      .filter((r) => r.map12 !== null)
-      .sort((a, b) => Number(a.params.optuna_trial ?? 0) - Number(b.params.optuna_trial ?? 0));
-    const trialMap = new Map<number, number>();
-    let best = -Infinity;
-    for (const r of sorted) {
-      const trial = Number(r.params.optuna_trial ?? 0);
-      best = Math.max(best, r.map12 as number);
-      trialMap.set(trial, best);
-      maxTrial = Math.max(maxTrial, trial);
-    }
-    bestAtTrial.set(g.key, trialMap);
-  }
-
-  const rows: Record<string, number | null>[] = [];
-  const lastKnown = new Map<string, number | null>(groups.map((g) => [g.key, null]));
-  for (let trial = 0; trial <= maxTrial; trial++) {
-    const row: Record<string, number | null> = { trial };
-    for (const g of groups) {
-      const trialMap = bestAtTrial.get(g.key)!;
-      if (trialMap.has(trial)) lastKnown.set(g.key, trialMap.get(trial)!);
-      row[g.key] = lastKnown.get(g.key) ?? null;
-    }
-    rows.push(row);
-  }
-  return rows;
-}
-
-interface OptunaTooltipPayloadItem {
-  dataKey: string;
-  value: number | null;
-  color: string;
-  name: string;
-}
-
-function OptunaTooltip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: OptunaTooltipPayloadItem[];
-  label?: number;
-}) {
-  if (!active || !payload || payload.length === 0) return null;
-  const entries = payload.filter((p) => p.value !== null && p.value !== undefined);
-  if (entries.length === 0) return null;
-  return (
-    <div className="chart-card" style={{ margin: 0, padding: 10, maxWidth: 280 }}>
-      <strong>Trial #{label}</strong>
-      {entries.map((p) => (
-        <div key={p.dataKey} className="tabular" style={{ color: p.color }}>
-          {p.name}: {p.value!.toFixed(4)}
-        </div>
-      ))}
     </div>
   );
 }
@@ -198,8 +153,11 @@ export default function EvolutionPanel() {
     return reals.map((r, i) => ({ ...r, idx: i + 1, group: runGroup(r) }));
   }, [runs]);
 
-  const optunaRuns: GroupedRun[] = useMemo(
-    () => runs.filter((r) => r.family === "Optuna").map((r, i) => ({ ...r, idx: i + 1, group: runGroup(r) })),
+  const optunaRuns: OptunaRun[] = useMemo(
+    () =>
+      runs
+        .filter((r) => r.family === "Optuna")
+        .map((r, i) => ({ ...r, idx: i + 1, group: runGroup(r), trial: Number(r.params.optuna_trial ?? i) })),
     [runs]
   );
 
@@ -230,6 +188,16 @@ export default function EvolutionPanel() {
     [optunaGroupsPresent, hiddenGroups]
   );
 
+  // Posición en X por familia (no por orden cronológico), para que los
+  // puntos de una misma familia se agrupen en una columna y se vea de un
+  // vistazo cuál es el mejor. Se indexa contra TODOS los grupos (no solo los
+  // visibles) para que ocultar una familia en la leyenda no desplace las
+  // columnas del resto.
+  const realRunsWithCatX = useMemo(
+    () => assignCategoryX(visibleRealRuns, realGroupsPresent),
+    [visibleRealRuns, realGroupsPresent]
+  );
+
   // Mejor run REAL (mayor MAP@12) entre los actualmente visibles: se excluyen
   // a propósito los trials de Optuna, que no son comparables en escala.
   const bestRun = useMemo(() => {
@@ -241,10 +209,15 @@ export default function EvolutionPanel() {
     return best;
   }, [visibleRealRuns]);
 
-  const optunaProgressRows = useMemo(
-    () => buildOptunaProgressRows(visibleOptunaRuns, visibleOptunaGroups),
-    [visibleOptunaRuns, visibleOptunaGroups]
-  );
+  // Mejor trial de Optuna (mayor MAP@12) entre los actualmente visibles.
+  const bestOptunaRun = useMemo(() => {
+    let best: OptunaRun | null = null;
+    for (const r of visibleOptunaRuns) {
+      if (r.map12 === null) continue;
+      if (!best || best.map12 === null || r.map12 > best.map12) best = r;
+    }
+    return best;
+  }, [visibleOptunaRuns]);
 
   return (
     <section>
@@ -270,9 +243,9 @@ export default function EvolutionPanel() {
         <>
           <h3>Runs reales</h3>
           <p className="muted">
-            Evolución cronológica de los modelos entrenados a escala completa (train.py /
-            experiment_xgboost.py). No incluye trials de Optuna: corren sobre una muestra reducida y
-            no son comparables en la misma escala de MAP@12.
+            Modelos entrenados a escala completa (train.py / experiment_xgboost.py), agrupados por
+            familia para comparar de un vistazo cuál rinde mejor. No incluye trials de Optuna: corren
+            sobre una muestra reducida y no son comparables en la misma escala de MAP@12.
           </p>
 
           {realGroupsPresent.length === 0 ? (
@@ -286,12 +259,15 @@ export default function EvolutionPanel() {
                   <ScatterChart margin={{ top: 16, right: 16, left: 8, bottom: 8 }}>
                     <CartesianGrid stroke="var(--gridline)" />
                     <XAxis
-                      dataKey="idx"
-                      name="Run"
+                      dataKey="catX"
+                      name="Familia"
+                      type="number"
+                      domain={[-0.5, realGroupsPresent.length - 0.5]}
+                      ticks={realGroupsPresent.map((_, i) => i)}
+                      tickFormatter={(v: number) => realGroupsPresent[Math.round(v)]?.label ?? ""}
                       tickLine={false}
                       axisLine={{ stroke: "var(--axis)" }}
                       tick={{ fill: "var(--text-muted)", fontSize: 12 }}
-                      label={{ value: "Orden de ejecución", position: "insideBottom", offset: -4, fill: "var(--text-muted)", fontSize: 12 }}
                     />
                     <YAxis
                       dataKey="map12"
@@ -309,7 +285,7 @@ export default function EvolutionPanel() {
                         <Scatter
                           key={g.key}
                           name={g.label}
-                          data={visibleRealRuns.filter((r) => r.group.key === g.key)}
+                          data={realRunsWithCatX.filter((r) => r.group.key === g.key)}
                           fill={g.color}
                         />
                       ))}
@@ -354,8 +330,8 @@ export default function EvolutionPanel() {
             <>
               <h3>Progreso de la búsqueda de hiperparámetros (Optuna)</h3>
               <p className="muted">
-                Mejor MAP@12 acumulado según avanzan los trials, por estudio/configuración de búsqueda.
-                Sirve para ver si la búsqueda converge — no para comparar contra los runs reales de arriba.
+                MAP@12 de cada trial individual, por estudio/configuración de búsqueda. Sirve para ver
+                la dispersión y si hay tendencia de mejora — no para comparar contra los runs reales de arriba.
               </p>
 
               <GroupLegend groups={optunaGroupsPresent} hiddenGroups={hiddenGroups} onToggle={toggleGroup} />
@@ -365,7 +341,7 @@ export default function EvolutionPanel() {
               ) : (
                 <div className="chart-card">
                   <ResponsiveContainer width="100%" height={320}>
-                    <LineChart data={optunaProgressRows} margin={{ top: 16, right: 16, left: 8, bottom: 8 }}>
+                    <ScatterChart margin={{ top: 16, right: 16, left: 8, bottom: 8 }}>
                       <CartesianGrid stroke="var(--gridline)" />
                       <XAxis
                         dataKey="trial"
@@ -378,29 +354,57 @@ export default function EvolutionPanel() {
                         allowDecimals={false}
                       />
                       <YAxis
+                        dataKey="map12"
+                        name="MAP@12"
                         tickFormatter={(v: number) => v.toFixed(4)}
                         tickLine={false}
                         axisLine={false}
                         tick={{ fill: "var(--text-muted)", fontSize: 12 }}
                         width={64}
-                        label={{ value: "Mejor MAP@12 hasta el momento", angle: -90, position: "insideLeft", fill: "var(--text-muted)", fontSize: 12 }}
                       />
-                      <Tooltip content={<OptunaTooltip />} cursor={{ strokeDasharray: "3 3" }} />
+                      <Tooltip content={<RunTooltip />} cursor={{ strokeDasharray: "3 3" }} />
                       {visibleOptunaGroups.map((g) => (
-                        <Line
+                        <Scatter
                           key={g.key}
-                          dataKey={g.key}
                           name={g.label}
-                          stroke={g.color}
-                          strokeWidth={2}
-                          dot={false}
-                          connectNulls={false}
-                          type="monotone"
-                          isAnimationActive={false}
+                          data={visibleOptunaRuns.filter((r) => r.group.key === g.key && r.map12 !== null)}
+                          fill={g.color}
                         />
                       ))}
-                    </LineChart>
+                    </ScatterChart>
                   </ResponsiveContainer>
+                </div>
+              )}
+
+              {bestOptunaRun && (
+                <div className="chart-card stat-tile-card">
+                  <span className="best-run-tag">Mejor trial de Optuna</span>
+                  <div className="stat-tile-grid">
+                    <div className="stat-tile">
+                      <div className="stat-tile-value">{bestOptunaRun.map12!.toFixed(4)}</div>
+                      <div className="stat-tile-label">MAP@12</div>
+                      <div className="stat-tile-desc">
+                        {bestRun && bestRun.map12
+                          ? `${bestOptunaRun.map12! >= bestRun.map12 ? "+" : ""}${(((bestOptunaRun.map12! - bestRun.map12) / bestRun.map12) * 100).toFixed(0)}% vs. mejor run real`
+                          : "Sobre la muestra de búsqueda, no comparable con runs reales"}
+                      </div>
+                    </div>
+                    <div className="stat-tile">
+                      <div className="stat-tile-value">{bestOptunaRun.total_hits ?? "—"}</div>
+                      <div className="stat-tile-label">Aciertos totales</div>
+                      <div className="stat-tile-desc">Artículos exactos acertados en el hold-out</div>
+                    </div>
+                    <div className="stat-tile">
+                      <div className="stat-tile-value">
+                        {bestOptunaRun.hit_rate !== null ? `${(bestOptunaRun.hit_rate * 100).toFixed(1)}%` : "—"}
+                      </div>
+                      <div className="stat-tile-label">% Aciertos</div>
+                      <div className="stat-tile-desc">Usuarios con al menos 1 acierto exacto</div>
+                    </div>
+                  </div>
+                  <div className="muted stat-tile-footer">
+                    {bestOptunaRun.run_name} · {bestOptunaRun.group.label} · {formatTimestamp(bestOptunaRun.start_time)}
+                  </div>
                 </div>
               )}
             </>
