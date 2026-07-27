@@ -102,6 +102,7 @@ TOP_K_CANDIDATES_BPR = 100
 TOP_K_CANDIDATES_CLUSTER = 30
 TOP_K_CANDIDATES_COV = 20
 TOP_K_CANDIDATES_POPULAR = 20
+TOP_K_CANDIDATES_SECCION = 20
 
 # --- MLflow ---
 MLFLOW_EXPERIMENT_NAME = "hym-recomendator2"
@@ -374,7 +375,8 @@ def entrenar_modelo_xgboost(
     bpr_neighbors_top_k=50, cache_dir=None,
     use_hybrid_candidates=False,
     candidate_top_k_bpr=100, candidate_top_k_cluster=30,
-    candidate_top_k_cov=20, candidate_top_k_pop=20,
+    candidate_top_k_cov=20, candidate_top_k_pop=1000,
+    candidate_top_k_seccion=1000,
     df_articles_for_candidates=None,
 ):
     """
@@ -442,6 +444,7 @@ def entrenar_modelo_xgboost(
             "candidate_top_k_cluster": candidate_top_k_cluster,
             "candidate_top_k_cov": candidate_top_k_cov,
             "candidate_top_k_pop": candidate_top_k_pop,
+            "candidate_top_k_seccion": candidate_top_k_seccion,
         }
         if extra_params:
             params.update(extra_params)
@@ -541,9 +544,15 @@ def entrenar_modelo_xgboost(
                 top_k_cluster=candidate_top_k_cluster,
                 top_k_cov=candidate_top_k_cov,
                 top_k_pop=candidate_top_k_pop,
+                top_k_seccion=candidate_top_k_seccion,
             )
             candidate_pool = article_encoded
             candidate_genero = candidate_pool["article_id"].map(article_to_gender)
+        else:
+            # === LO ÚNICO QUE AÑADES ES ESTE BLOQUE ===
+            df_u = pd.DataFrame({"customer_id": eval_users})
+            df_p = candidate_pool[["article_id"]]
+            candidate_pairs = df_u.merge(df_p, how="cross")    
 
         actual_dict = dict(zip(eval_users, actual))
         recall_cand, hits_cand, total_reales = calcular_recall_candidatos(candidate_pairs, actual_dict)
@@ -572,10 +581,10 @@ def entrenar_modelo_xgboost(
             predicciones, article_to_category, actual_categories_test, categorias_compradas_general, k_eval,
         )
         total_hits, hit_rate = registrar_metricas_aciertos(actual, predicciones, k_eval)
-
+        hit_rate_rel = total_hits/hits_cand if hits_cand > 0 else 0.0
         print(
             f"[XGBoost] {run_name} -> MAP@12 = {map12:.4f}  |  CatTest = {cat_hit_test:.4f}  |  "
-            f"CatGeneral = {cat_hit_general:.4f}  |  Aciertos = {total_hits}  |  HitRate = {hit_rate:.4f}  |  params={params}"
+            f"CatGeneral = {cat_hit_general:.4f}  |  Aciertos = {total_hits}  |  HitRate = {hit_rate:.4f}  | HitRateRel={hit_rate_rel:.4f}  |  params={params}"
         )
         print(f"Inferencia XGBoost: {time.time() - t0_infer:.2f}s")
     resultado = {
@@ -592,6 +601,7 @@ def entrenar_modelo_xgboost(
         "category_hit_rate_general": cat_hit_general,
         "total_hits": total_hits,
         "hit_rate": hit_rate,
+        "hit_rate_rel": hit_rate_rel,
         "recall_cand": recall_cand,
     }
     return resultado

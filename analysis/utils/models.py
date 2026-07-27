@@ -1221,6 +1221,63 @@ def generar_candidatos_covisitacion(clientes, historial_dict, cov_dict, top_k=20
     return pd.DataFrame(resultados, columns=["customer_id", "article_id"])
 
 
+def generar_candidatos_seccion_favorita(
+    clientes, 
+    df_train, 
+    df_articles, 
+    top_k=20, 
+    num_secciones=3, 
+    columna_seccion="section_name"
+):
+    """
+    1. Encuentra las TOP N secciones favoritas de cada cliente.
+    2. Encuentra los top K artículos más vendidos de cada sección globalmente.
+    3. Cruza ambas informaciones para generar candidatos.
+    """
+    if columna_seccion not in df_articles.columns:
+        print(f"Advertencia: No se encontró '{columna_seccion}' en df_articles. Se omite esta estrategia.")
+        return pd.DataFrame(columns=["customer_id", "article_id"])
+
+    # 1. TOP ARTÍCULOS POR SECCIÓN GLOBALES
+    top_por_seccion = (
+    df_articles[[columna_seccion, 'article_id', 'sales_last_30d']]
+    .sort_values([columna_seccion, 'sales_last_30d'], ascending=[True, False])
+    .groupby(columna_seccion)
+    .head(top_k)
+)
+
+    # 1. Filtrar transacciones solo para los clientes objetivo (Súper eficiente)
+    df_train_sub = df_train[df_train['customer_id'].isin(clientes)]
+
+    if df_train_sub.empty:
+        return pd.DataFrame(columns=["customer_id", "article_id"])
+
+    # 2. Hacer el merge únicamente con la columna de la sección requerida
+    train_clientes = df_train_sub[['customer_id', 'article_id']].merge(
+    df_articles[['article_id', columna_seccion]], 
+    on='article_id', 
+    how='inner'
+    )   
+
+    # 3. Calcular las secciones favoritas por cliente
+    seccion_fav = (
+    train_clientes.groupby(['customer_id', columna_seccion])
+    .size()
+    .reset_index(name='compras')
+    .sort_values(['customer_id', 'compras'], ascending=[True, False])
+    )
+    
+    # AQUI ESTÁ EL CAMBIO: Cogemos sus Top N secciones
+    seccion_fav = seccion_fav.groupby('customer_id').head(num_secciones)
+
+    # 3. ASIGNAR CANDIDATOS
+    candidatos = seccion_fav[['customer_id', columna_seccion]].merge(
+        top_por_seccion[[columna_seccion, 'article_id']], on=columna_seccion, how='inner'
+    )
+
+    return candidatos[['customer_id', 'article_id']]
+
+
 def generar_candidatos_populares(clientes, df_articles, top_k=20):
     """
     Candidatos "de tendencia" (cold-start): los top_k artículos más vendidos
@@ -1253,7 +1310,9 @@ def generar_candidatos_hibridos(
     top_k_bpr=100,
     top_k_cluster=30,
     top_k_cov=20,
-    top_k_pop=20,
+    top_k_pop=1000,
+    top_k_seccion=1000,
+    col_seccion="section_name",
 ):
     """
     Ejecuta las estrategias de candidatos y fusiona pares customer/article.
@@ -1290,6 +1349,19 @@ def generar_candidatos_hibridos(
     if top_k_pop > 0:
         print(" -> Populares")
         frames.append(generar_candidatos_populares(clientes, df_articles, top_k=top_k_pop))
+
+    if top_k_seccion > 0:
+        print(" -> Top Sección Favorita")
+        frames.append(
+            generar_candidatos_seccion_favorita(
+                clientes, 
+                df_train, 
+                df_articles, 
+                top_k=top_k_seccion, 
+                num_secciones=3,               # <--- PARÁMETRO FIJO
+                columna_seccion=col_seccion
+            )
+        )     
 
     if not frames:
         return pd.DataFrame(columns=["customer_id", "article_id", "bpr_score"])

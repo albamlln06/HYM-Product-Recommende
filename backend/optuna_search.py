@@ -75,7 +75,7 @@ from train import (
 )
 
 # --- Muestra reducida solo para la búsqueda (más rápida que la de train.py) ---
-SEARCH_N_CUSTOMERS = 3000
+SEARCH_N_CUSTOMERS = 1000
 SEARCH_CANDIDATE_POOL_SIZE = 40000
 # Caché propia (distinta de backend/bpr_cache que usa train.py) para no
 # invalidar entre sí las cachés de co-visitación al alternar entre este
@@ -168,7 +168,8 @@ def make_objective(datos, study_name, use_hybrid_candidates):
             cand_params["candidate_top_k_bpr"] = trial.suggest_int("cand_top_k_bpr", 100, 400, step=10)
             cand_params["candidate_top_k_cluster"] = trial.suggest_int("cand_top_k_cluster", 50, 200, step=5)
             cand_params["candidate_top_k_cov"] = trial.suggest_int("cand_top_k_cov", 50, 150, step=5)
-            cand_params["candidate_top_k_pop"] = trial.suggest_int("cand_top_k_pop", 100, 500, step=5)
+            #cand_params["candidate_top_k_pop"] = trial.suggest_int("cand_top_k_pop", 100, 500, step=5)
+            #cand_params["candidate_top_k_seccion"] = trial.suggest_int("cand_top_k_seccion", 50, 300, step=5)
 
         resultado = entrenar_modelo_xgboost(
             datos["df_customers"], datos["df_products"], datos["df_train"],
@@ -205,6 +206,7 @@ def make_objective(datos, study_name, use_hybrid_candidates):
         trial.set_user_attr("total_hits", resultado["total_hits"])
         trial.set_user_attr("cat_hit_test", resultado["category_hit_rate_test"])
         trial.set_user_attr("cat_hit_general", resultado["category_hit_rate_general"])
+        trial.set_user_attr("hit_rate_rel", resultado["hit_rate_rel"])
             
         return resultado["map12"]
 
@@ -213,7 +215,7 @@ def make_objective(datos, study_name, use_hybrid_candidates):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--n-trials", type=int, default=30, help="Número de combinaciones a probar")
+    parser.add_argument("--n-trials", type=int, default=100, help="Número de combinaciones a probar")
     parser.add_argument("--study-name", type=str, default="xgboost_hpo", help="Nombre del estudio de Optuna")
     parser.add_argument(
         "--use-hybrid-candidates", dest="use_hybrid_candidates", action="store_true", default=True,
