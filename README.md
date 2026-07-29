@@ -6,6 +6,7 @@
 
 ## Table of Contents
 - [Introduction](#introduction)
+- [Data File](data-files)
 - [Step 0 — Data Preparation (identical for all 4 models)](#step-0--data-preparation-identical-for-all-4-models)
 - [Model 1 — Random](#model-1--random)
 - [Model 2 — Popular](#model-2--popular)
@@ -22,7 +23,13 @@
 - [Visual Summary](#visual-summary)
 
 ---
+## 📊 Project Data
 
+Due to the file size of the raw and processed datasets (`.parquet` files), they are hosted externally on Google Drive:
+
+* 💾 **[Download Datasets & Parquet Files Here](https://drive.google.com/drive/folders/1TwyF3AuPr3M1LpWu2mquUpEQvgkkyer-?usp=sharing)**
+
+> **Note:** To reproduce the pipeline locally, download the contents and place them inside the `data/` directory at the root of the project.
 ## Introduction
 
 This document provides a clear, step-by-step explanation of how each of the four recommendation models in this project operates—from raw data loading to generating and evaluating recommendation quality.
